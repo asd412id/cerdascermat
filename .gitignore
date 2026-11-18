@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.wrangler/
+.vite/
+.env
+.env.local
+.env.*.local
+*.log
+playwright-report/
+test-results/
+.firebase/
+coverage/
+.DS_Store
+
+.dev.vars
+.owner-password.local
+
+# artefak lokal: state wrangler, rencana agen, unggahan sementara
+.wrangler-dryrun/
+telegram_uploads/
+.codeq/

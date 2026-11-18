@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cerdascermat-api",
+  "workers_dev": true,
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [
+      { "name": "PLATFORM", "class_name": "PlatformDO" },
+      { "name": "EVENT", "class_name": "EventDO" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PlatformDO", "EventDO"]
+    }
+  ],
+  "vars": {
+    "ALLOWED_ORIGINS": "http://localhost:5173,http://localhost:4173,https://cerdas-cermat-2026.web.app,https://cerdas-cermat-2026.firebaseapp.com",
+    "ALLOW_ADMIN_SIGNUP": "false",
+    "SESSION_TTL_HOURS": "12",
+    "LEAD_MS": "900",
+    "DECISION_MS": "220",
+    "TIE_MS": "15",
+    "READY_MAX_U_MS": "150"
+  }
+}

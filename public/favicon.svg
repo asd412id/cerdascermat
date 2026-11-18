@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Cerdas Cermat">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2A241D" />
+      <stop offset="1" stop-color="#100E0C" />
+    </linearGradient>
+    <linearGradient id="dome" x1="0.32" y1="0.05" x2="0.68" y2="0.95">
+      <stop offset="0" stop-color="#E4FF9B" />
+      <stop offset="0.52" stop-color="#C6F24E" />
+      <stop offset="1" stop-color="#93CC1F" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#bg)" />
+  <circle cx="256" cy="256" r="198" fill="none" stroke="#E8B44F" stroke-opacity="0.3" stroke-width="7" />
+  <circle cx="256" cy="256" r="160" fill="#0B0A09" />
+  <circle cx="256" cy="256" r="146" fill="url(#dome)" />
+  <circle cx="256" cy="256" r="104" fill="none" stroke="#E8B44F" stroke-opacity="0.9" stroke-width="10" />
+  <ellipse cx="214" cy="188" rx="52" ry="29" fill="#FFFFFF" fill-opacity="0.28" transform="rotate(-28 214 188)" />
+  <circle cx="256" cy="256" r="30" fill="#100E0C" />
+</svg>

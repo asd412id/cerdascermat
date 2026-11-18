@@ -1,0 +1,286 @@
+@import "tailwindcss";
+@import "@fontsource-variable/space-grotesk";
+@import "@fontsource-variable/public-sans";
+@import "@fontsource-variable/jetbrains-mono";
+
+@theme {
+  --color-bg: #1a1714;
+  --color-panel: #221f1a;
+  --color-panel2: #292420;
+  --color-line: #4a4239;
+  --color-line-soft: #342e28;
+  --color-ink: #f2ede4;
+  --color-signal: #c6f24e;
+  --color-gold: #e8b44f;
+  --color-danger: #e0553f;
+  --color-ok: #6fbf7a;
+  --font-display: "Space Grotesk Variable", "Space Grotesk", ui-sans-serif, sans-serif;
+  --font-sans: "Public Sans Variable", "Public Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-line-soft);
+  }
+
+  html {
+    background: var(--color-bg);
+    color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+    background: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  ::selection {
+    background: var(--color-signal);
+    color: #1a1714;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-signal);
+    outline-offset: 2px;
+  }
+
+  button {
+    font: inherit;
+    cursor: pointer;
+  }
+
+  input {
+    font: inherit;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0;
+  }
+}
+
+@layer components {
+  .label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.2;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: color-mix(in oklab, var(--color-ink) 62%, transparent);
+  }
+
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+  }
+
+  .panel {
+    background: var(--color-panel);
+    border: 1px solid var(--color-line);
+  }
+
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--color-line);
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 40px;
+    padding: 0 14px;
+    border: 1px solid var(--color-line);
+    background: transparent;
+    color: var(--color-ink);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border-radius: 1px;
+    transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease;
+  }
+
+  .btn:hover:not(:disabled) {
+    border-color: color-mix(in oklab, var(--color-ink) 55%, transparent);
+    background: var(--color-panel2);
+  }
+
+  .btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--color-signal);
+    border-color: var(--color-signal);
+    color: #16130f;
+    font-weight: 700;
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background: color-mix(in oklab, var(--color-signal) 88%, white);
+    border-color: color-mix(in oklab, var(--color-signal) 88%, white);
+  }
+
+  .btn-gold {
+    background: var(--color-gold);
+    border-color: var(--color-gold);
+    color: #1a1714;
+    font-weight: 700;
+  }
+
+  .btn-danger {
+    color: var(--color-danger);
+    border-color: color-mix(in oklab, var(--color-danger) 55%, transparent);
+  }
+
+  .btn-lg {
+    min-height: 56px;
+    padding: 0 20px;
+    font-size: 13px;
+  }
+
+  .field {
+    width: 100%;
+    background: var(--color-bg);
+    border: 1px solid var(--color-line);
+    border-radius: 1px;
+    color: var(--color-ink);
+    padding: 12px 12px;
+    font-family: var(--font-sans);
+  }
+
+  .field::placeholder {
+    color: color-mix(in oklab, var(--color-ink) 38%, transparent);
+  }
+
+  .field:focus {
+    outline: none;
+    border-color: var(--color-signal);
+  }
+
+  .field-code {
+    font-family: var(--font-mono);
+    font-size: 26px;
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+    padding: 14px 12px;
+  }
+
+  /* Dropdown bawaan browser tidak mengikuti tema gelap: panah diganti sendiri
+     agar teks pilihan tidak terpotong dan daftar opsi tetap terbaca. */
+  select.field {
+    appearance: none;
+    -webkit-appearance: none;
+    /* padding vertikal .field lebih besar dari tinggi kotak ringkas (h-9),
+       jadi teks pilihan menonjol ke atas: nolkan dan biarkan browser memusatkan */
+    padding-top: 0;
+    padding-bottom: 0;
+    padding-right: 34px;
+    line-height: normal;
+    background-image:
+      linear-gradient(45deg, transparent calc(50% - 1px), currentColor calc(50% - 1px), currentColor calc(50% + 1px), transparent calc(50% + 1px)),
+      linear-gradient(-45deg, transparent calc(50% - 1px), currentColor calc(50% - 1px), currentColor calc(50% + 1px), transparent calc(50% + 1px));
+    background-position: calc(100% - 17px) calc(50% - 1px), calc(100% - 12px) calc(50% - 1px);
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    color-scheme: dark;
+    text-overflow: ellipsis;
+    cursor: pointer;
+  }
+
+  select.field option {
+    background: var(--color-panel);
+    color: var(--color-ink);
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--color-line);
+    padding: 3px 7px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+  }
+
+  .link {
+    color: color-mix(in oklab, var(--color-ink) 70%, transparent);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: var(--color-line);
+    transition: color 140ms ease;
+  }
+
+  .link:hover {
+    color: var(--color-signal);
+  }
+
+  .row {
+    border-bottom: 1px solid var(--color-line-soft);
+  }
+
+  .row:last-child {
+    border-bottom: 0;
+  }
+
+  .fade {
+    animation: fade 160ms ease both;
+  }
+
+  .rise {
+    animation: rise 180ms ease both;
+  }
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

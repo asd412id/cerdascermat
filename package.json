@@ -1,0 +1,45 @@
+{
+  "name": "cerdascermat",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cerdas cermat realtime buzzer — SPA di Firebase Hosting, wasit di Cloudflare Workers",
+  "scripts": {
+    "dev:api": "wrangler dev --port 8787",
+    "dev:web": "vite --port 5173",
+    "build": "vite build",
+    "build:e2e": "vite build --mode e2e",
+    "preview": "vite preview --port 4173",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.worker.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "deploy:api": "wrangler deploy",
+    "deploy:web": "firebase deploy --only hosting"
+  },
+  "dependencies": {
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/public-sans": "^5.3.0",
+    "@fontsource-variable/space-grotesk": "^5.3.0",
+    "hono": "^4.13.19",
+    "qrcode": "^1.5.4",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261118.1",
+    "@playwright/test": "^1.65.1",
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/node": "^26.6.6",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vite-plugin-pwa": "^2.0.0",
+    "vitest": "^5.1.1",
+    "wrangler": "^4.164.0"
+  }
+}
