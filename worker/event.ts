@@ -16,9 +16,12 @@ import {
   type Snapshot,
   type TeamPublic,
 } from '@shared/protocol';
-import { normalizePress } from '@shared/rank';
+import { normalizePress, tieRequiresChoice } from '@shared/rank';
 import type { Env } from './env';
 import { newId, normalizeCode, randomHex, sha256Hex, timingSafeEqual } from './auth';
+
+/** Batas atas RTT yang masuk akal; klien melaporkan `u` = RTT/2, jadi RTT = 2u. */
+const MAX_RTT_MS = 4000;
 
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
@@ -113,8 +116,6 @@ export class EventDO extends DurableObject<Env> {
   private readonly presence = new Map<string, number>();
   private readonly syncState = new Map<string, { at: number; u: number }>();
   private readonly lastPersist = new Map<string, number>();
-  /** probe RTT dari sisi server: t0 klien + t2 server pada sampel sebelumnya */
-  private readonly rttProbe = new Map<string, { t0: number; t2: number }>();
   private teamsDirty = false;
   private teamsTimer: ReturnType<typeof setTimeout> | null = null;
   private readyKey = '';
@@ -207,7 +208,6 @@ export class EventDO extends DurableObject<Env> {
       d: p.d_ms,
       u: p.u_ms,
       recvDelta: p.recv_ms - attempt.open_at,
-      rttMinMs: teams.get(p.team_id)?.rtt_min_ms ?? 0,
     }));
     const result = rankPresses(inputs, meta.tieMs);
     // dNorm dihitung ulang dari klaim tersimpan agar konsisten setelah tieMs berubah.
@@ -408,7 +408,6 @@ export class EventDO extends DurableObject<Env> {
     this.meta = null;
     this.presence.clear();
     this.syncState.clear();
-    this.rttProbe.clear();
     this.lastPersist.clear();
     this.readyKey = '';
     return this.json({ ok: true });
@@ -441,32 +440,41 @@ export class EventDO extends DurableObject<Env> {
       );
     const name = cleanTeamName(body.teamName ?? '');
     if (name.length < 2) return this.json({ error: 'name_too_short', message: 'Nama tim minimal 2 karakter.' }, 400);
-    const count = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM teams').one().n;
-    if (count >= MAX_TEAMS)
-      return this.json(
-        { error: 'event_full', message: 'Peserta lomba ini sudah penuh. Hubungi operator.' },
-        409,
-      );
-    const duplicate = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM teams WHERE lower(name) = lower(?)', name).one();
-    if (duplicate.n > 0)
-      return this.json(
-        { error: 'name_taken', message: `Nama "${name}" sudah dipakai tim lain. Pilih nama yang berbeda.` },
-        409,
-      );
 
+    // Hash token (async) diselesaikan lebih dulu supaya cek kuota/nama dan INSERT
+    // di bawah berjalan dalam satu blok sinkron: Durable Object memproses satu event
+    // sekaligus, jadi dua join bersamaan tidak bisa sama-sama lolos.
     const token = randomHex(24);
     const tokenHash = await sha256Hex(token);
     const id = newId('team');
     const now = Date.now();
-    this.sql.exec(
-      'INSERT INTO teams (id, name, token_hash, score, joined_at, last_seen_at, status) VALUES (?, ?, ?, 0, ?, ?, ?)',
+    const inserted = this.sql.exec(
+      `INSERT INTO teams (id, name, token_hash, score, joined_at, last_seen_at, status)
+       SELECT ?, ?, ?, 0, ?, ?, 'active'
+       WHERE (SELECT COUNT(*) FROM teams) < ?
+         AND NOT EXISTS (SELECT 1 FROM teams WHERE lower(name) = lower(?))`,
       id,
       name,
       tokenHash,
       now,
       now,
-      'active',
+      MAX_TEAMS,
+      name,
     );
+
+    if (inserted.rowsWritten === 0) {
+      const full = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM teams').one().n >= MAX_TEAMS;
+      if (full)
+        return this.json(
+          { error: 'event_full', message: 'Peserta lomba ini sudah penuh. Hubungi operator.' },
+          409,
+        );
+      return this.json(
+        { error: 'name_taken', message: `Nama "${name}" sudah dipakai tim lain. Pilih nama yang berbeda.` },
+        409,
+      );
+    }
+
     this.markTeamsChanged();
     return this.json({ teamId: id, token, teamName: name, eventCode: meta.code, eventId: meta.id, eventName: meta.name }, 201);
   }
@@ -603,6 +611,14 @@ export class EventDO extends DurableObject<Env> {
     if (!wasOnline) this.markTeamsChanged();
   }
 
+  /** Simpan RTT terkecil yang dilaporkan klien (2×u). Hanya untuk tampilan laporan. */
+  private recordRtt(teamId: string, rttMs: number): void {
+    if (!(rttMs > 0) || rttMs > MAX_RTT_MS) return;
+    const current = this.sql.exec<{ rtt_min_ms: number | null }>('SELECT rtt_min_ms FROM teams WHERE id = ?', teamId).toArray()[0];
+    if (current?.rtt_min_ms !== null && current?.rtt_min_ms !== undefined && current.rtt_min_ms <= rttMs) return;
+    this.sql.exec('UPDATE teams SET rtt_min_ms = ? WHERE id = ?', Math.round(rttMs * 10) / 10, teamId);
+  }
+
   private async handleSync(ws: WebSocket, attachment: Attachment, message: Record<string, unknown>): Promise<void> {
     const t1 = Date.now();
     const seq = Number(message.seq) || 0;
@@ -611,19 +627,14 @@ export class EventDO extends DurableObject<Env> {
     if (attachment.teamId) {
       this.touchTeam(attachment.teamId);
       const u = Number(message.u);
-      if (Number.isFinite(u) && u >= 0) this.syncState.set(attachment.teamId, { at: Date.now(), u: Math.min(u, 2000) });
-
-      // RTT diukur server dari selisih dua sampel: (t_server - t2_lalu) - (t0_kini - t0_lalu).
-      const previous = this.rttProbe.get(attachment.teamId);
-      if (previous) {
-        const rtt = t1 - previous.t2 - (t0 - previous.t0);
-        if (rtt >= 0 && rtt < 10_000) {
-          const current = this.sql.exec<{ rtt_min_ms: number | null }>('SELECT rtt_min_ms FROM teams WHERE id = ?', attachment.teamId).toArray()[0];
-          const best = current?.rtt_min_ms === null || current?.rtt_min_ms === undefined ? rtt : Math.min(current.rtt_min_ms, rtt);
-          this.sql.exec('UPDATE teams SET rtt_min_ms = ? WHERE id = ?', Math.round(best * 10) / 10, attachment.teamId);
-        }
+      if (Number.isFinite(u) && u >= 0) {
+        const clampedU = Math.min(u, 2000);
+        this.syncState.set(attachment.teamId, { at: Date.now(), u: clampedU });
+        // `u` adalah galat offset jam klien hasil sinkronisasi NTP di perangkat
+        // (src/lib/clock.ts: u = rtt/2), jadi RTT ≈ 2u. Nilai ini hanya untuk
+        // laporan operator; pemeringkatan memakai `u` yang dijepit server.
+        this.recordRtt(attachment.teamId, clampedU * 2);
       }
-      this.rttProbe.set(attachment.teamId, { t0, t2 });
       this.markReadyChanged();
     }
     this.send(ws, { type: 'sync-ack', seq, t0, t1, t2 });
@@ -648,6 +659,12 @@ export class EventDO extends DurableObject<Env> {
       return;
     }
     const now = Date.now();
+    // Alarm penutup bisa tertunda; jangan pernah menerima tekan setelah close_at.
+    if (attempt.close_at !== null && now >= attempt.close_at) {
+      this.closeAttempt(attempt.id);
+      this.send(ws, { type: 'press.rejected', attemptId, status: 'closed', message: 'Ronde sudah ditutup.' });
+      return;
+    }
     if (now < attempt.open_at) {
       this.send(ws, { type: 'press.rejected', attemptId, status: 'early', message: 'Tombol belum terbuka. Tunggu warna hijau.' });
       return;
@@ -664,14 +681,15 @@ export class EventDO extends DurableObject<Env> {
       return;
     }
 
-    const u = Math.min(2000, Math.max(0, Number(message.u) || 0));
+    // `u` hanya masuk ke batas atas jendela dan margin seri. Jepit ke ambang yang
+    // diakui operator supaya klien tidak bisa menggelembungkannya.
+    const u = Math.min(meta.readyMaxUMs, Math.max(0, Number(message.u) || 0));
     const recvDelta = now - attempt.open_at;
     const normalized = normalizePress({
       teamId,
       d: Number(message.d) || 0,
       u,
       recvDelta,
-      rttMinMs: team.rtt_min_ms ?? 0,
     });
     const ordinal = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM presses WHERE attempt_id = ?', attempt.id).one().n + 1;
     this.sql.exec(
@@ -735,7 +753,6 @@ export class EventDO extends DurableObject<Env> {
     if (attachment.teamId) {
       this.presence.delete(attachment.teamId);
       this.syncState.delete(attachment.teamId);
-      this.rttProbe.delete(attachment.teamId);
       this.sql.exec('UPDATE teams SET last_seen_at = ? WHERE id = ?', Date.now(), attachment.teamId);
       this.markTeamsChanged();
       this.markReadyChanged();
@@ -810,7 +827,16 @@ export class EventDO extends DurableObject<Env> {
         const round = this.latestRound();
         if (!round || round.status !== 'open') return this.json({ error: 'no_open_round' }, 409);
         const attempt = this.latestAttempt(round.id);
-        const ranking = attempt ? this.attemptRanking(attempt).ranking : [];
+        const { ranking, tie } = attempt ? this.attemptRanking(attempt) : { ranking: [], tie: false };
+        // Seri teknis tidak boleh diputuskan diam-diam oleh server: operator harus
+        // memilih tim pemenang secara eksplisit (`explicit: true` dari UI setelah
+        // menekan tombol kandidat). Klien yang hanya meneruskan kandidat default
+        // ditolak, karena kandidat default = urutan abjad, bukan pilihan operator.
+        if (tieRequiresChoice(tie, payload))
+          return this.json(
+            { error: 'tie_requires_choice', message: 'Hasil seri teknis — pilih tim pemenang lebih dulu.' },
+            409,
+          );
         const teamId = String(payload.teamId ?? (attempt ? this.candidateTeamId(attempt, ranking) : '') ?? '');
         const team = this.sql.exec<TeamRow>('SELECT * FROM teams WHERE id = ?', teamId).toArray()[0];
         if (!team) return this.json({ error: 'team_not_found' }, 404);
@@ -939,7 +965,6 @@ export class EventDO extends DurableObject<Env> {
         this.sql.exec('DELETE FROM teams WHERE id = ?', teamId);
         this.presence.delete(teamId);
         this.syncState.delete(teamId);
-        this.rttProbe.delete(teamId);
         this.lastPersist.delete(teamId);
         for (const ws of this.ctx.getWebSockets()) {
           const att = ws.deserializeAttachment() as Attachment | null;

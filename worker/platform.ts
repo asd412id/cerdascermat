@@ -3,6 +3,9 @@ import type { AdminRole, DisplayMode, EventMeta, EventStatus } from '@shared/pro
 import type { Env } from './env';
 import { generateJoinCode, hashPassword, newId, normalizeCode, randomHex, sha256Hex, verifyPassword } from './auth';
 
+const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_WINDOW_MS = 300_000;
+
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS admins (
     id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
@@ -11,6 +14,9 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY, admin_id TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at)`,
+  `CREATE TABLE IF NOT EXISTS login_throttle (
+    ip TEXT PRIMARY KEY, count INTEGER NOT NULL, reset_at INTEGER NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS login_throttle_reset_idx ON login_throttle(reset_at)`,
   `CREATE TABLE IF NOT EXISTS events (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, code TEXT UNIQUE NOT NULL,
     status TEXT NOT NULL DEFAULT 'draft', display_mode TEXT NOT NULL DEFAULT 'top1',
@@ -128,16 +134,42 @@ export class PlatformDO extends DurableObject<Env> {
   }
 
   private async handleLogin(request: Request): Promise<Response> {
-    const body = (await request.json().catch(() => ({}))) as { username?: string; password?: string };
+    const body = (await request.json().catch(() => ({}))) as { username?: string; password?: string; ip?: string };
     const username = (body.username ?? '').trim().toLowerCase();
     const password = body.password ?? '';
-    if (!username || !password) return this.json({ error: 'invalid_credentials' }, 401);
+    const ip = (body.ip ?? 'local').slice(0, 120);
+    const now = Date.now();
+
+    // Pembatas percobaan hidup di sini supaya berlaku lintas isolate dan tidak
+    // bisa dikosongkan dengan menunggu isolate didaur ulang.
+    this.sql.exec('DELETE FROM login_throttle WHERE reset_at < ?', now);
+    const throttle = this.sql
+      .exec<{ count: number }>('SELECT count FROM login_throttle WHERE ip = ?', ip)
+      .toArray()[0];
+    if (throttle && throttle.count >= LOGIN_MAX_ATTEMPTS) {
+      return this.json({ error: 'too_many_attempts' }, 429);
+    }
+    // Cacah dinaikkan SEBELUM `await` berikutnya: tidak ada celah check-then-act,
+    // jadi permintaan paralel dari satu IP tidak bisa sama-sama lolos saat count
+    // masih di bawah ambang. Baris kedaluwarsa sudah dihapus di atas, sehingga
+    // sisa baris selalu jendela aktif.
+    this.sql.exec(
+      `INSERT INTO login_throttle (ip, count, reset_at) VALUES (?, 1, ?)
+       ON CONFLICT(ip) DO UPDATE SET count = count + 1`,
+      ip,
+      now + LOGIN_WINDOW_MS,
+    );
+
+    const fail = () => this.json({ error: 'invalid_credentials' }, 401);
+
+    if (!username || !password) return fail();
     const admin = this.sql
       .exec<AdminRow>('SELECT * FROM admins WHERE username = ?', username)
       .toArray()[0];
-    if (!admin) return this.json({ error: 'invalid_credentials' }, 401);
+    if (!admin) return fail();
     const ok = await verifyPassword(password, admin.password_hash, admin.salt);
-    if (!ok) return this.json({ error: 'invalid_credentials' }, 401);
+    if (!ok) return fail();
+    this.sql.exec('DELETE FROM login_throttle WHERE ip = ?', ip);
     const { token, expiresAt } = await this.createSession(admin.id);
     this.sql.exec('UPDATE admins SET last_login_at = ? WHERE id = ?', Date.now(), admin.id);
     return this.json({

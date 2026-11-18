@@ -129,10 +129,11 @@ const run = async () => {
   const scored = snapshot.snapshot.teams.find((t) => t.id === teams[1].teamId);
   if (scored.score !== 25) throw new Error(`skor manual gagal: ${scored.score}`);
 
-  const csv = await fetch(`${BASE}/api/events/${eventId}/export.csv`, { headers: { authorization: `Bearer ${token}` } });
-  if (!csv.ok) throw new Error('ekspor CSV gagal');
-  const csvText = await csv.text();
-  if (!csvText.includes('Smoke Beta')) throw new Error('CSV tidak memuat tim');
+  const report = await fetch(`${BASE}/api/events/${eventId}/state`, { headers: { authorization: `Bearer ${token}` } });
+  if (!report.ok) throw new Error(`laporan state gagal: ${report.status}`);
+  const reportBody = await report.json();
+  if (!reportBody.snapshot?.teams?.some((t) => t.name === 'Smoke Beta')) throw new Error('snapshot tidak memuat tim');
+  if (!reportBody.snapshot?.audit?.length) throw new Error('snapshot tidak memuat audit');
 
   // aksi admin lanjutan: ubah pemenang, lempar giliran, batalkan ronde, mode, status, audit
   const winner = await api(

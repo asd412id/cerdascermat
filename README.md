@@ -16,7 +16,7 @@ Aplikasi rebutan (buzzer) cerdas cermat: peserta menekan tombol di HP, wasit wak
 | `shared/rank.ts` | Normalisasi klaim tekan dan pemeringkatan. |
 | `src/pages/*` | `Join`, `Team`, `Admin`, `Screen`, `Fairness`. |
 | `db/*.sql` | Skema SQLite untuk kedua Durable Object. |
-| `scripts/smoke.mjs` | Uji realtime tanpa browser (login → join → tekan → reset → skor → CSV). |
+| `scripts/smoke.mjs` | Uji realtime tanpa browser (login → join → tekan → reset → skor → snapshot). |
 | `tests/flow.spec.ts` | E2E Playwright (Edge): alur lomba, screenshot, CORS/auth. |
 
 ## Prasyarat
@@ -76,7 +76,7 @@ SPA: `VITE_API_BASE` (origin Worker, tanpa garis miring di akhir). Lihat `.env.e
 4. **Buka rebutan** mengirim waktu buka absolut `LEAD_MS` ke depan; tombol peserta menyala otomatis. Bila ada tim belum siap, gunakan **buka paksa** — tercatat di audit.
 5. Setelah tekan: **Beri poin** untuk kandidat aktif, **Tidak bisa → lempar** untuk memindah kandidat, **Reset tombol** untuk percobaan baru pada ronde yang sama, **Batalkan ronde** untuk membatalkan.
 6. Seri teknis tidak diputus diam-diam: operator melihat kandidat dan memilih ulang atau mengulang ronde.
-7. **Skor manual** mencatat `delta` dan alasan ke audit. **CSV** mengekspor attempt dan skor untuk arsip.
+7. **Skor manual** mencatat `delta` dan alasan ke audit. **Excel** menyusun laporan `.xlsx` di peramban operator (Ringkasan, Klasemen, Peringkat Ronde, Log Aktivitas) dari snapshot lomba.
 
 ## Keadilan waktu
 
@@ -140,7 +140,7 @@ node scripts/smoke.mjs https://cerdascermat-api.asdar-binsyam.workers.dev
 
 ## Operasional & batasan
 
-- Data lomba hidup di SQLite milik `EventDO`. Arsipkan lewat CSV sebelum menghapus lomba; tidak ada backup otomatis lintas akun.
+- Data lomba hidup di SQLite milik `EventDO`. Arsipkan lewat tombol **Excel** sebelum menghapus lomba (laporan memuat 40 catatan audit terakhir, bukan seluruh riwayat); tidak ada backup otomatis lintas akun.
 - Satu perangkat hanya boleh mewakili satu tim. Token tim disimpan di `localStorage`; "Keluar tim" menghapus sesi perangkat.
 - Service worker hanya meng-cache aset SPA. Saat API mati, halaman tetap terbuka tetapi menampilkan status terputus dan tombol tidak dinilai.
 - Bila peserta melaporkan tombolnya tidak menyala, lihat panel **Kesiapan** di admin: tim berstatus “belum siap” berarti socket, sinkronisasi jam, atau `u`-nya belum memenuhi ambang. Periksa `ALLOWED_ORIGINS`, jam perangkat, dan kualitas jaringan. UI sengaja tidak menampilkan angka diagnostik.

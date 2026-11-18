@@ -3,12 +3,25 @@
  *
  * Klien merekam `d` = performance.now() - openAtLocal saat pointerdown.
  * Server tidak membandingkan waktu terima; ia memvalidasi `d` terhadap
- * jendela fisika (perjalanan minimum RTT + ketidakpastian offset + jitter)
- * lalu memberi peringkat berdasarkan `dNorm`.
+ * jendela fisika lalu memberi peringkat berdasarkan `dNorm`.
+ *
+ * Fisika: `recvDelta = d + up`, dengan `up` latensi satu arah. Server hanya
+ * tahu `recvDelta`, jadi lantai jendela = recvDelta - up - slack. `u` adalah
+ * taksiran klien untuk `up` (galat offset jam ≈ RTT/2), sehingga lantai
+ * memakai `u` — tetap dijepit MAX_FLOOR_ALLOWANCE_MS supaya klien yang
+ * membesar-besarkan `u` hanya mendapat kelonggaran sebesar plafon itu, bukan
+ * waktu tanpa batas seperti sebelumnya.
  */
 
 export const EARLY_SLACK_MS = 30;
 export const LATE_SLACK_MS = 30;
+
+/**
+ * Plafon kelonggaran lantai jendela. Disamakan dengan ambang kesiapan default
+ * (READY_MAX_U_MS = 150) supaya tim yang dinyatakan siap tidak dihukum diam-diam,
+ * sekaligus membatasi keuntungan klien yang memalsukan `u`.
+ */
+export const MAX_FLOOR_ALLOWANCE_MS = 150;
 
 export type PressFlag = 'impossible_fast' | 'impossible_slow' | 'clamped';
 
@@ -22,10 +35,7 @@ export interface PressRaw {
   recvDelta: number;
 }
 
-export interface PressInput extends PressRaw {
-  /** RTT minimum yang diukur server untuk tim ini, ms */
-  rttMinMs: number;
-}
+export type PressInput = PressRaw;
 
 export interface RankedPress {
   teamId: string;
@@ -49,8 +59,10 @@ export interface RankResult {
 
 export function normalizePress(input: PressInput): { dNorm: number; flags: PressFlag[] } {
   const flags: PressFlag[] = [];
-  const travelFloor = input.recvDelta - input.rttMinMs - input.u - EARLY_SLACK_MS;
-  const travelCeil = input.recvDelta + input.u + LATE_SLACK_MS;
+  const rawU = Number.isFinite(input.u) ? Math.max(0, input.u) : 0;
+  const allowance = Math.min(rawU, MAX_FLOOR_ALLOWANCE_MS);
+  const travelFloor = input.recvDelta - allowance - EARLY_SLACK_MS;
+  const travelCeil = input.recvDelta + allowance + LATE_SLACK_MS;
 
   let d = input.d;
   if (!Number.isFinite(d)) {
@@ -68,6 +80,16 @@ export function normalizePress(input: PressInput): { dNorm: number; flags: Press
 /** Selisih (b - a) bila menang a dan seri bila selisih <= TIE_MS + u_a + u_b. */
 export function tieMargin(tieMs: number, uA: number, uB: number): number {
   return tieMs + Math.max(0, uA) + Math.max(0, uB);
+}
+
+/**
+ * Seri teknis tidak boleh diputuskan server: operator harus mengirim `teamId`
+ * pilihan sendiri beserta `explicit: true`. Tanpa itu kandidat default (urutan
+ * abjad ranking) menang tanpa pernah dipilih siapa pun.
+ */
+export function tieRequiresChoice(tie: boolean, payload: { teamId?: unknown; explicit?: unknown }): boolean {
+  if (!tie) return false;
+  return typeof payload.teamId !== 'string' || payload.teamId.length === 0 || payload.explicit !== true;
 }
 
 export function rankPresses(presses: PressInput[], tieMs = 15): RankResult {

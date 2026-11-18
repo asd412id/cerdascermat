@@ -35,6 +35,10 @@ export default defineConfig({
         // Service worker hanya mengurus aset SPA di origin Firebase.
         navigateFallback: '/index.html',
         globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+        // ExcelJS (±930 kB) hanya diunduh saat operator mengekspor laporan; jangan
+        // ikut diprecache saat service worker dipasang. Runtime cache /assets/ di
+        // bawah tetap menyimpannya setelah pemakaian pertama.
+        globIgnores: ['**/exceljs*.js'],
         runtimeCaching: [
           {
             urlPattern: ({ url, sameOrigin }) => sameOrigin && url.pathname.startsWith('/assets/'),

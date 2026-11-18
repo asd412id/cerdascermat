@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import type { AuditEntry, EventMeta, Snapshot, TeamPublic } from '@shared/protocol';
-import { ApiError, api, apiUrl } from '../lib/api';
+import { ApiError, api } from '../lib/api';
 import { clearAdminToken, loadAdminEventId, loadAdminToken, saveAdminEventId, saveAdminToken } from '../lib/storage';
 import { useEventSocket } from '../hooks/useEventSocket';
 import { QrCode } from '../components/QrCode';
@@ -179,6 +179,7 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
   const [busy, setBusy] = useState<string | null>(null);
   const [newEventName, setNewEventName] = useState('');
   const [creating, setCreating] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [scoreTarget, setScoreTarget] = useState<{ id: string; name: string } | null>(null);
   const [forceArmed, setForceArmed] = useState(false);
   const [admins, setAdmins] = useState<AdminSummary[]>([]);
@@ -192,6 +193,8 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmKick, setConfirmKick] = useState<{ id: string; name: string } | null>(null);
+  /** Kandidat yang dipilih operator saat terjadi seri; terikat ke attempt tertentu. */
+  const [tiePick, setTiePick] = useState<{ attemptId: string; teamId: string } | null>(null);
 
   const selected = useMemo(() => events.find((event) => event.id === selectedId) ?? null, [events, selectedId]);
 
@@ -279,20 +282,19 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
     }
   };
 
-  const exportCsv = async () => {
+  /** Ambil snapshot terbaru lalu susun laporan .xlsx di peramban (exceljs dimuat saat perlu). */
+  const exportExcel = async () => {
     if (!selected) return;
+    setExporting(true);
     try {
-      const response = await fetch(apiUrl(`/api/events/${selected.id}/export.csv`), { headers: { authorization: `Bearer ${token}` } });
-      if (!response.ok) throw new Error('Ekspor gagal.');
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = `cerdas-cermat-${selected.code}.csv`;
-      anchor.click();
-      URL.revokeObjectURL(url);
+      const response = await api<{ snapshot: Snapshot }>(`/api/events/${selected.id}/state`, {}, token);
+      const { downloadWorkbook } = await import('../lib/export');
+      await downloadWorkbook(response.snapshot);
+      setNotice('Laporan Excel diunduh.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ekspor gagal.');
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -409,6 +411,10 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
   const candidateId = snapshot?.candidateTeamId ?? null;
   const round = snapshot?.round ?? null;
   const attempt = snapshot?.attempt ?? null;
+  /** Pilihan seri hanya berlaku untuk attempt yang sedang berjalan. */
+  const tieChoice = tiePick && attempt && tiePick.attemptId === attempt.id ? tiePick.teamId : null;
+  const tie = snapshot?.tie === true;
+  const needsTieChoice = tie && !tieChoice;
   const allReady = teams.length > 0 && ready.size === teams.length;
   const registrationOpen = snapshot?.event.status === 'open';
   /** Lomba berjalan hanya setelah operator menekan "Mulai lomba". */
@@ -486,8 +492,8 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
                 <a className="btn h-10" href={`/screen?code=${selected.code}`} target="_blank" rel="noreferrer">
                   Layar
                 </a>
-                <button type="button" className="btn h-10" onClick={() => void exportCsv()}>
-                  CSV
+                <button type="button" className="btn h-10" onClick={() => void exportExcel()} disabled={exporting}>
+                  {exporting ? 'menyusun…' : 'Excel'}
                 </button>
                 {me.role === 'owner' ? (
                   <button
@@ -673,7 +679,7 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
               >
                 {snapshot?.tie ? (
                   <div className="border-b border-gold/40 bg-gold/10 px-3 py-2 text-[12px] text-gold">
-                    Seri: selisih dua tekan terlalu kecil. Pilih kandidat atau ulangi ronde.
+                    Seri: selisih dua tekan terlalu kecil. Pilih kandidat yang menang (tombol “kandidat”) sebelum memberi poin.
                   </div>
                 ) : null}
                 {ranking.length === 0 ? (
@@ -720,7 +726,10 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
                                   className="btn h-7 min-h-0 px-2 text-[10px] whitespace-nowrap"
                                   disabled={busy !== null || row.teamId === candidateId}
                                   title={`Jadikan ${row.name} kandidat aktif`}
-                                  onClick={() => void run('set_winner', { teamId: row.teamId })}
+                                  onClick={() => {
+                                    if (attempt) setTiePick({ attemptId: attempt.id, teamId: row.teamId });
+                                    void run('set_winner', { teamId: row.teamId });
+                                  }}
                                 >
                                   kandidat
                                 </button>
@@ -736,10 +745,16 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
                   <button
                     type="button"
                     className="btn btn-gold"
-                    disabled={busy !== null || !round || round.status !== 'open' || !candidateId}
+                    disabled={busy !== null || !round || round.status !== 'open' || !candidateId || needsTieChoice}
+                    title={needsTieChoice ? 'Hasil seri: pilih kandidat pemenang lebih dulu.' : undefined}
                     onClick={async () => {
-                      const ok = await run('settle', { teamId: candidateId });
-                      if (ok) setNotice('Poin diberikan ke kandidat aktif.');
+                      const teamId = needsTieChoice ? null : tie ? tieChoice : candidateId;
+                      if (!teamId) return;
+                      const ok = await run('settle', tie ? { teamId, explicit: true } : { teamId });
+                      if (ok) {
+                        setTiePick(null);
+                        setNotice('Poin diberikan ke kandidat aktif.');
+                      }
                     }}
                   >
                     Beri poin +{round?.points ?? snapshot?.event.pointsPerRound ?? 100}

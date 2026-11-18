@@ -40,7 +40,8 @@ const admin = await context.newPage();
 watch(admin, 'admin');
 await admin.goto(`${BASE}/admin`, { waitUntil: 'networkidle' });
 await admin.getByLabel('Nama pengguna').fill(USERNAME);
-await admin.getByLabel('Sandi').fill(PASSWORD);
+// `exact` wajib: tombol "Tampilkan sandi" juga mengandung kata "sandi".
+await admin.getByLabel('Sandi', { exact: true }).fill(PASSWORD);
 await admin.getByRole('button', { name: 'Masuk' }).click();
 await admin.getByRole('heading', { name: 'Pilih lomba' }).waitFor({ timeout: 20_000 });
 console.log('ok  admin    : login produksi diterima, dasbor terbuka');

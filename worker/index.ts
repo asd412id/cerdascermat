@@ -8,8 +8,6 @@ type Variables = { origin: string | undefined };
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
-const loginAttempts = new Map<string, { count: number; resetAt: number }>();
-
 function allowedOrigins(env: Env): string[] {
   return (env.ALLOWED_ORIGINS ?? '')
     .split(',')
@@ -113,23 +111,21 @@ function eventStub(env: Env, eventId: string) {
 // ---------- auth ----------
 
 app.post('/api/auth/login', async (c) => {
+  // Pembatas percobaan disimpan di PlatformDO supaya berlaku lintas isolate —
+  // Map di level modul hilang setiap isolate didaur ulang dan memakan memori.
   const ip = c.req.header('cf-connecting-ip') ?? 'local';
-  const now = Date.now();
-  const attempt = loginAttempts.get(ip);
-  if (attempt && attempt.resetAt > now && attempt.count >= 10) {
-    return c.json({ error: 'too_many_attempts', message: 'Terlalu banyak percobaan. Tunggu 5 menit.' }, 429);
-  }
   const body = (await c.req.json().catch(() => ({}))) as { username?: string; password?: string };
   const { status, body: result } = await platformJson<Record<string, unknown>>(c.env, '/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ username: body.username, password: body.password }),
+    body: JSON.stringify({ username: body.username, password: body.password, ip }),
   });
+  if (status === 429) {
+    return c.json({ error: 'too_many_attempts', message: 'Terlalu banyak percobaan. Tunggu 5 menit.' }, 429);
+  }
   if (status !== 200) {
-    loginAttempts.set(ip, attempt && attempt.resetAt > now ? { count: attempt.count + 1, resetAt: attempt.resetAt } : { count: 1, resetAt: now + 300_000 });
     return c.json({ error: 'invalid_credentials', message: 'Nama pengguna atau sandi salah.' }, 401);
   }
-  loginAttempts.delete(ip);
   return c.json(result, 200);
 });
 
@@ -268,36 +264,6 @@ app.get('/api/events/:id/state', async (c) => {
   const response = await eventStub(c.env, eventId).fetch('https://event/snapshot?role=admin');
   const body = (await response.json()) as { snapshot?: Snapshot };
   return c.json(body, response.status as 200);
-});
-
-app.get('/api/events/:id/export.csv', async (c) => {
-  const session = await requireSession(c);
-  if (isResponse(session)) return session;
-  const response = await eventStub(c.env, c.req.param('id')).fetch('https://event/snapshot?role=admin');
-  const { snapshot } = (await response.json()) as { snapshot: Snapshot };
-  const rows: string[][] = [
-    ['lomba', snapshot.event.name],
-    ['kode', snapshot.event.code],
-    ['mode_tampilan', snapshot.event.displayMode],
-    ['ronde', String(snapshot.round?.seq ?? '')],
-    ['status_ronde', snapshot.round?.status ?? ''],
-    [],
-    ['tim', 'skor', 'online', 'rtt_min_ms'],
-    ...snapshot.teams.map((t) => [t.name, String(t.score), t.online ? 'ya' : 'tidak', t.rttMinMs === null ? '' : String(t.rttMinMs)]),
-    [],
-    ['peringkat', 'tim', 'd_norm_ms', 'd_klaim_ms', 'u_ms', 'selisih_ms', 'flag'],
-    ...snapshot.ranking.map((r) => [String(r.rank), r.name, String(r.dNorm), String(r.dRaw), String(r.u), String(r.gapMs), r.flags.join('|')]),
-    [],
-    ['waktu', 'admin', 'aksi', 'payload'],
-    ...snapshot.audit.map((a) => [new Date(a.createdAt).toISOString(), a.adminId ?? '', a.action, JSON.stringify(a.payload)]),
-  ];
-  const csv = rows.map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\r\n');
-  return new Response(`\uFEFF${csv}`, {
-    headers: {
-      'content-type': 'text/csv; charset=utf-8',
-      'content-disposition': `attachment; filename="cerdas-cermat-${snapshot.event.code}.csv"`,
-    },
-  });
 });
 
 // ---------- publik ----------

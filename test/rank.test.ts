@@ -1,26 +1,42 @@
 import { describe, expect, it } from 'vitest';
-import { normalizePress, rankPresses, type PressInput } from '../shared/rank';
+import {
+  EARLY_SLACK_MS,
+  MAX_FLOOR_ALLOWANCE_MS,
+  normalizePress,
+  rankPresses,
+  tieRequiresChoice,
+  type PressInput,
+} from '../shared/rank';
 
+/** Klaim wajar: latensi satu arah `up` sebanding dengan `u` (u = RTT/2). */
 function press(teamId: string, d: number, opts: Partial<PressInput> = {}): PressInput {
-  return { teamId, d, u: 15, recvDelta: d + 40, rttMinMs: 20, ...opts };
+  return { teamId, d, u: 15, recvDelta: d + 15, ...opts };
 }
 
 describe('normalizePress', () => {
   it('membiarkan klaim wajar apa adanya', () => {
-    const { dNorm, flags } = normalizePress(press('a', 180, { recvDelta: 220, rttMinMs: 20, u: 10 }));
+    const { dNorm, flags } = normalizePress(press('a', 180, { u: 10, recvDelta: 190 }));
     expect(dNorm).toBe(180);
     expect(flags).toEqual([]);
   });
 
-  it('menandai klaim 30 ms di masa lalu sebagai impossible_fast', () => {
-    // recv 70 ms setelah open, rttMin 20, u 10, slack 30 → lantai = 10 ms
-    const { dNorm, flags } = normalizePress({ teamId: 'a', d: -30, u: 10, recvDelta: 70, rttMinMs: 20 });
+  it('menandai klaim di masa lalu sebagai impossible_fast', () => {
+    // recv 70 ms setelah open, u 10, slack 30 → lantai = 70 - 10 - 30 = 30 ms
+    const { dNorm, flags } = normalizePress({ teamId: 'a', d: -30, u: 10, recvDelta: 70 });
     expect(flags).toContain('impossible_fast');
-    expect(dNorm).toBe(10);
+    expect(dNorm).toBe(30);
+  });
+
+  it('u yang digelembungkan hanya menggeser lantai sebesar plafon kelonggaran', () => {
+    // Eksploit lama: u raksasa menurunkan lantai tanpa batas. Kini lantai dijepit
+    // MAX_FLOOR_ALLOWANCE_MS, jadi keuntungan maksimal berbohong = plafon itu.
+    const cheat = normalizePress({ teamId: 'b', d: -1700, u: 2000, recvDelta: 250 });
+    expect(cheat.flags).toContain('impossible_fast');
+    expect(cheat.dNorm).toBe(250 - MAX_FLOOR_ALLOWANCE_MS - EARLY_SLACK_MS);
   });
 
   it('menandai klaim lebih lambat dari waktu terima sebagai impossible_slow', () => {
-    const { dNorm, flags } = normalizePress({ teamId: 'a', d: 400, u: 10, recvDelta: 200, rttMinMs: 20 });
+    const { dNorm, flags } = normalizePress({ teamId: 'a', d: 400, u: 10, recvDelta: 200 });
     expect(flags).toContain('impossible_slow');
     expect(dNorm).toBe(240);
   });
@@ -33,11 +49,16 @@ describe('normalizePress', () => {
     expect(a.flags).toEqual([]);
   });
 
-  it('rtt 20 vs 200 ms: keduanya sah, tapi rentang fisika klien lambat lebih lebar', () => {
-    const fast = normalizePress({ teamId: 'fast', d: 150, u: 10, recvDelta: 170, rttMinMs: 20 });
-    const slow = normalizePress({ teamId: 'slow', d: 150, u: 100, recvDelta: 300, rttMinMs: 200 });
+  it('tim berlatensi tinggi dikoreksi sampai plafon, selebihnya dijepit', () => {
+    const fast = normalizePress(press('fast', 150, { u: 10, recvDelta: 160 }));
+    const slow = normalizePress(press('slow', 150, { u: 140, recvDelta: 290 }));
+    const beyond = normalizePress(press('beyond', 150, { u: 600, recvDelta: 750 }));
     expect(fast.flags).toEqual([]);
     expect(slow.flags).toEqual([]);
+    expect(slow.dNorm).toBe(150);
+    // 750 - plafon 150 - slack 30 = 570: koreksi berhenti di plafon.
+    expect(beyond.dNorm).toBe(750 - MAX_FLOOR_ALLOWANCE_MS - EARLY_SLACK_MS);
+    expect(beyond.flags).toContain('impossible_fast');
   });
 });
 
@@ -45,9 +66,10 @@ describe('rankPresses', () => {
   it('mengurutkan berdasarkan d, bukan waktu terima paket', () => {
     const result = rankPresses([
       // B tiba di server lebih dulu (260 ms) tetapi reaksinya 240 ms;
-      // A punya RTT 300 ms sehingga paketnya tiba 500 ms, namun reaksinya 190 ms.
-      press('b', 240, { recvDelta: 260, rttMinMs: 20 }),
-      press('a', 190, { recvDelta: 500, rttMinMs: 300 }),
+      // A punya latensi satu arah 140 ms sehingga paketnya tiba 330 ms, namun
+      // reaksinya 190 ms — masih di dalam jendela fisika miliknya.
+      press('b', 240, { recvDelta: 260, u: 15 }),
+      press('a', 190, { u: 140, recvDelta: 330 }),
     ]);
     expect(result.ranking.map((r) => r.teamId)).toEqual(['a', 'b']);
     expect(result.winnerTeamId).toBe('a');
@@ -89,5 +111,19 @@ describe('rankPresses', () => {
     const result = rankPresses([press('a', 200), press('b', 275)], 0);
     expect(result.ranking[0].gapMs).toBe(0);
     expect(result.ranking[1].gapMs).toBe(75);
+  });
+});
+
+describe('tieRequiresChoice', () => {
+  it('seri tanpa pilihan eksplisit ditolak', () => {
+    expect(tieRequiresChoice(true, {})).toBe(true);
+    expect(tieRequiresChoice(true, { teamId: 't1' })).toBe(true);
+    expect(tieRequiresChoice(true, { teamId: 't1', explicit: false })).toBe(true);
+    expect(tieRequiresChoice(true, { teamId: '', explicit: true })).toBe(true);
+  });
+
+  it('pilihan eksplisit diterima, dan bukan seri tidak butuh pilihan', () => {
+    expect(tieRequiresChoice(true, { teamId: 't1', explicit: true })).toBe(false);
+    expect(tieRequiresChoice(false, {})).toBe(false);
   });
 });
