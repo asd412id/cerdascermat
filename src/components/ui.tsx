@@ -157,6 +157,27 @@ function EyeIcon({ hidden }: { hidden: boolean }) {
   );
 }
 
+/** Ikon bel: dipakai tombol suara bel dan spanduk tekan di papan skor. */
+export function BellIcon({ muted = false, className = 'h-3.5 w-3.5' }: { muted?: boolean; className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M6 16V11a6 6 0 0 1 12 0v5l1.6 2.6H4.4L6 16Z" />
+      <path d="M10 20a2 2 0 0 0 4 0" />
+      {muted ? <path d="M4 20 20 4" /> : null}
+    </svg>
+  );
+}
+
 /**
  * Kolom sandi dengan tombol ikon mata. Label tetap terpisah dari tombol agar
  * nama aksesibel kolom tidak tercampur teks tombol.

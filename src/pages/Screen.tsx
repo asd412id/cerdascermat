@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import type { Snapshot } from '@shared/protocol';
 import { useEventSocket } from '../hooks/useEventSocket';
 import { QrCode } from '../components/QrCode';
-import { Chip, PageLoader, StatusDot, statusLabel } from '../components/ui';
+import { BellIcon, Chip, PageLoader, StatusDot, statusLabel } from '../components/ui';
 import { ApiError, api } from '../lib/api';
-import { loadScreenCode, saveScreenCode } from '../lib/storage';
+import { pressBellKey, primeBell, ringBell } from '../lib/bell';
+import { loadScreenCode, loadScreenSound, saveScreenCode, saveScreenSound } from '../lib/storage';
 
 export function ScreenBoard() {
   const [activeCode, setActiveCode] = useState<string | null>(() => {
@@ -14,10 +15,53 @@ export function ScreenBoard() {
   const [input, setInput] = useState('');
   /** Kode lomba tidak ada di server (mis. lomba sudah dihapus operator). */
   const [missing, setMissing] = useState(false);
+  const [soundOn, setSoundOn] = useState(() => loadScreenSound());
+  /** Audio baru boleh berbunyi setelah satu gestur pengguna (kebijakan peramban). */
+  const [audioReady, setAudioReady] = useState(false);
+  /** Tekanan terakhir yang sudah dibunyikan, agar satu tekan tidak berbunyi dua kali. */
+  const lastBellKey = useRef('');
+  const [flash, setFlash] = useState<{ teamName: string; count: number } | null>(null);
 
   useEffect(() => {
     if (activeCode) saveScreenCode(activeCode);
   }, [activeCode]);
+
+  // Suara bel bisa tersimpan menyala dari sesi sebelumnya, tetapi konteks audio
+  // baru hidup setelah ada gestur: buka kunci pada sentuhan/ketikan pertama.
+  useEffect(() => {
+    if (!soundOn || audioReady) return;
+    const unlock = () => {
+      void primeBell().then((ok) => {
+        if (ok) setAudioReady(true);
+      });
+    };
+    document.addEventListener('pointerdown', unlock);
+    document.addEventListener('keydown', unlock);
+    return () => {
+      document.removeEventListener('pointerdown', unlock);
+      document.removeEventListener('keydown', unlock);
+    };
+  }, [soundOn, audioReady]);
+
+  // Spanduk bel hanya tampil sebentar supaya papan skor tidak tertutup terus.
+  useEffect(() => {
+    if (!flash) return;
+    const timer = setTimeout(() => setFlash(null), 5000);
+    return () => clearTimeout(timer);
+  }, [flash]);
+
+  const toggleSound = async () => {
+    if (soundOn && audioReady) {
+      setSoundOn(false);
+      saveScreenSound(false);
+      return;
+    }
+    // Klik ini sendiri adalah gestur yang dibutuhkan peramban untuk membuka audio.
+    const ok = await primeBell();
+    setAudioReady(ok);
+    setSoundOn(ok);
+    saveScreenSound(ok);
+  };
 
   // Socket ke kode yang tidak ada hanya akan putus-nyambung tanpa henti, jadi
   // ketersediaan lomba dicek lewat HTTP: 404 = tampilkan layar "tidak tersedia".
@@ -51,6 +95,17 @@ export function ScreenBoard() {
         setActiveCode(null);
         setInput('');
         setMissing(false);
+        return;
+      }
+      // Tekan pertama — atau susunan yang berubah karena kiriman telat — langsung
+      // diberi bel dan spanduk, supaya penonton tahu tanpa menunggu operator.
+      if (message.type === 'attempt.ranked' && message.ranking.length > 0) {
+        const key = pressBellKey(message.attemptId, message.ranking);
+        if (key !== lastBellKey.current) {
+          lastBellKey.current = key;
+          if (soundOn) ringBell();
+          setFlash({ teamName: message.ranking[0].name, count: message.ranking.length });
+        }
       }
     },
   });
@@ -128,6 +183,16 @@ export function ScreenBoard() {
           </Chip>
           <button
             type="button"
+            className={`chip transition-colors ${soundOn ? 'border-gold/50 text-gold' : 'text-ink/45 hover:text-ink/70'}`}
+            onClick={() => void toggleSound()}
+            aria-pressed={soundOn}
+            title={soundOn ? 'Matikan suara bel' : 'Bunyikan bel setiap ada peserta yang menekan'}
+          >
+            <BellIcon muted={!soundOn} />
+            {soundOn ? (audioReady ? 'bel aktif' : 'klik untuk bunyi') : 'bel mati'}
+          </button>
+          <button
+            type="button"
             className="link text-[12px]"
             onClick={() => {
               setActiveCode(null);
@@ -138,6 +203,20 @@ export function ScreenBoard() {
           </button>
         </div>
       </header>
+
+      {flash ? (
+        <div className="bell-flash flex flex-wrap items-center gap-4 border-b border-gold bg-gold px-6 py-3 text-bg" role="alert">
+          <BellIcon className="size-8 shrink-0" />
+          <div className="min-w-0">
+            <div className="label text-bg/70">bel ditekan</div>
+            <div className="truncate font-display text-[clamp(24px,3.2vw,42px)] leading-none font-bold">{flash.teamName}</div>
+          </div>
+          <div className="ml-auto shrink-0 text-right">
+            <div className="label text-bg/70">tekanan</div>
+            <div className="num text-[clamp(18px,2.2vw,30px)] leading-none">{flash.count}</div>
+          </div>
+        </div>
+      ) : null}
 
       {lobby ? (
         <div className="grid flex-1 grid-cols-1 gap-6 p-6 xl:grid-cols-[1fr_auto]">

@@ -13,6 +13,7 @@ const LAST_TEAM_KEY = 'cc.team.last.v1';
 const ADMIN_KEY = 'cc.admin.token.v1';
 const ADMIN_EVENT_KEY = 'cc.admin.event.v1';
 const SCREEN_CODE_KEY = 'cc.screen.code.v1';
+const SCREEN_SOUND_KEY = 'cc.screen.sound.v1';
 
 function read(key: string): string | null {
   try {
@@ -119,6 +120,19 @@ export function loadScreenCode(): string | null {
 export function saveScreenCode(code: string): void {
   try {
     localStorage.setItem(SCREEN_CODE_KEY, code);
+  } catch {
+    // abaikan
+  }
+}
+
+/** Suara bel papan skor; default mati agar tidak mengagetkan saat layar dibuka. */
+export function loadScreenSound(): boolean {
+  return read(SCREEN_SOUND_KEY) === 'on';
+}
+
+export function saveScreenSound(on: boolean): void {
+  try {
+    localStorage.setItem(SCREEN_SOUND_KEY, on ? 'on' : 'off');
   } catch {
     // abaikan
   }
