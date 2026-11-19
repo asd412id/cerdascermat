@@ -98,13 +98,8 @@ E2E menyimpan screenshot di `test-results/screens/` (admin 1440/768/390, tim 390
 
 ## Deploy
 
-Produksi saat ini:
-
-| Bagian | URL |
-|---|---|
-| Aplikasi peserta/admin/papan skor | https://cerdas-cermat-2026.web.app |
-| API + WebSocket | https://cerdascermat-api.asdar-binsyam.workers.dev |
-| Firebase project | `cerdas-cermat-2026` (`.firebaserc`) |
+Deploy dipisah: Worker (API + WebSocket) dan hosting statis SPA. Endpoint produksi
+sengaja tidak ditulis di repo — isi origin milik Anda sendiri.
 
 API:
 
@@ -116,32 +111,35 @@ printf '%s' "$OWNER_PASSWORD" | npx wrangler secret put OWNER_PASSWORD
 npx wrangler deploy
 ```
 
-`ALLOWED_ORIGINS` diisi di `wrangler.jsonc` (localhost + `https://cerdas-cermat-2026.web.app` + `https://cerdas-cermat-2026.firebaseapp.com`). `workers_dev: true` wajib ada, kalau tidak rute `*.workers.dev` mati dan URL menghasilkan galat 1042.
+Isi `ALLOWED_ORIGINS` di `wrangler.jsonc` dengan origin SPA Anda (termasuk localhost
+saat mengembangkan). `workers_dev: true` wajib ada, kalau tidak rute `*.workers.dev`
+mati dan URL menghasilkan galat 1042.
 
 `wrangler.jsonc` sudah memuat migrasi `new_sqlite_classes` untuk kedua DO. Jangan mengubah nama kelas/binding tanpa migrasi baru.
 
 Web:
 
 ```bash
-VITE_API_BASE=https://cerdascermat-api.asdar-binsyam.workers.dev npm run build
+VITE_API_BASE=https://<worker-anda>.workers.dev npm run build
 npx firebase-tools deploy --only hosting
 ```
 
-`firebase.json` mengatur rewrite SPA, header cache (`/`, `/index.html`, `sw.js` selalu `no-cache`), CSP, dan `X-Frame-Options`.
+Proyek Firebase mengikuti `.firebaserc`. `firebase.json` mengatur rewrite SPA, header
+cache (`/`, `/index.html`, `sw.js` selalu `no-cache`), CSP, dan `X-Frame-Options`.
 
 Verifikasi setelah deploy:
 
 ```bash
-node scripts/prod-check.mjs                      # SPA + CORS + login admin di browser Edge
-node scripts/smoke.mjs https://cerdascermat-api.asdar-binsyam.workers.dev
+node scripts/prod-check.mjs <url-spa-anda>   # SPA + CORS + login admin di browser Edge
+node scripts/smoke.mjs <api-url>             # membuat satu lomba uji beserta tim
 ```
 
-`prod-check.mjs` tidak menulis data; `smoke.mjs` membuat satu lomba uji beserta 3 tim di produksi.
+`prod-check.mjs` tidak menulis data; `smoke.mjs` membuat data uji di server yang dituju.
 
 ## Operasional & batasan
 
 - Data lomba hidup di SQLite milik `EventDO`. Arsipkan lewat tombol **Excel** sebelum menghapus lomba (laporan memuat 40 catatan audit terakhir, bukan seluruh riwayat); tidak ada backup otomatis lintas akun.
 - Satu perangkat hanya boleh mewakili satu tim. Token tim disimpan di `localStorage`; "Keluar tim" menghapus sesi perangkat.
-- Service worker hanya meng-cache aset SPA. Saat API mati, halaman tetap terbuka tetapi menampilkan status terputus dan tombol tidak dinilai.
+- Service worker hanya meng-cache aset SPA. Saat API mati, halaman tetap terbuka; peserta melihat status terputus, dan tekan yang sudah tercatat di perangkat dikirim ulang saat sambungan pulih.
 - Bila peserta melaporkan tombolnya tidak menyala, lihat panel **Kesiapan** di admin: tim berstatus “belum siap” berarti socket, sinkronisasi jam, atau `u`-nya belum memenuhi ambang. Periksa `ALLOWED_ORIGINS`, jam perangkat, dan kualitas jaringan. UI sengaja tidak menampilkan angka diagnostik.
 - 403 pada `/api/health` berarti `Origin` pemanggil tidak ada di `ALLOWED_ORIGINS`.
