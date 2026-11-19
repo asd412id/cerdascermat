@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
-  EARLY_SLACK_MS,
+  LATE_DELIVERY_GRACE_MS,
   MAX_FLOOR_ALLOWANCE_MS,
   normalizePress,
+  pressNeedsReview,
+  pressWindow,
   rankPresses,
+  requiresExplicitChoice,
   tieRequiresChoice,
   type PressInput,
 } from '../shared/rank';
@@ -20,24 +23,27 @@ describe('normalizePress', () => {
     expect(flags).toEqual([]);
   });
 
-  it('menandai klaim di masa lalu sebagai impossible_fast', () => {
-    // recv 70 ms setelah open, u 10, slack 30 → lantai = 70 - 10 - 30 = 30 ms
+  it('tidak menaikkan klaim yang lebih cepat dari lantai fisika', () => {
+    // recv 70 ms setelah open, u 10, slack 30 → lantai 30 ms. Klaim -30 ms
+    // tadinya dinaikkan ke 30 ms; sekarang hanya dijepit ke 0 dan ditandai.
     const { dNorm, flags } = normalizePress({ teamId: 'a', d: -30, u: 10, recvDelta: 70 });
+    expect(dNorm).toBe(0);
     expect(flags).toContain('impossible_fast');
-    expect(dNorm).toBe(30);
+    expect(flags).toContain('clamped');
   });
 
-  it('u yang digelembungkan hanya menggeser lantai sebesar plafon kelonggaran', () => {
-    // Eksploit lama: u raksasa menurunkan lantai tanpa batas. Kini lantai dijepit
-    // MAX_FLOOR_ALLOWANCE_MS, jadi keuntungan maksimal berbohong = plafon itu.
+  it('u yang digelembungkan tidak lagi menaikkan klaim', () => {
+    // Eksploit lama: u raksasa menurunkan lantai, lalu klaim dinaikkan ke lantai
+    // itu. Kini klaim tetap dipakai apa adanya, hanya diberi tanda.
     const cheat = normalizePress({ teamId: 'b', d: -1700, u: 2000, recvDelta: 250 });
     expect(cheat.flags).toContain('impossible_fast');
-    expect(cheat.dNorm).toBe(250 - MAX_FLOOR_ALLOWANCE_MS - EARLY_SLACK_MS);
+    expect(cheat.dNorm).toBe(0);
   });
 
-  it('menandai klaim lebih lambat dari waktu terima sebagai impossible_slow', () => {
+  it('klaim yang lebih lambat dari batas atas dijepit ke batas itu', () => {
     const { dNorm, flags } = normalizePress({ teamId: 'a', d: 400, u: 10, recvDelta: 200 });
     expect(flags).toContain('impossible_slow');
+    // 200 + 10 + 30 = 240 ms
     expect(dNorm).toBe(240);
   });
 
@@ -49,16 +55,73 @@ describe('normalizePress', () => {
     expect(a.flags).toEqual([]);
   });
 
-  it('tim berlatensi tinggi dikoreksi sampai plafon, selebihnya dijepit', () => {
+  it('tim berlatensi tinggi tetap memakai klaimnya, bukan lantai fisika', () => {
     const fast = normalizePress(press('fast', 150, { u: 10, recvDelta: 160 }));
     const slow = normalizePress(press('slow', 150, { u: 140, recvDelta: 290 }));
     const beyond = normalizePress(press('beyond', 150, { u: 600, recvDelta: 750 }));
     expect(fast.flags).toEqual([]);
     expect(slow.flags).toEqual([]);
     expect(slow.dNorm).toBe(150);
-    // 750 - plafon 150 - slack 30 = 570: koreksi berhenti di plafon.
-    expect(beyond.dNorm).toBe(750 - MAX_FLOOR_ALLOWANCE_MS - EARLY_SLACK_MS);
+    // 750 - plafon 150 - slack 30 = 570: di bawah lantai, tetapi klaim tidak
+    // dinaikkan ke 570 — peserta lambat tidak dihukum karena jaringannya.
+    expect(beyond.dNorm).toBe(150);
     expect(beyond.flags).toContain('impossible_fast');
+  });
+
+  it('klaim 200 ms dengan uplink lambat tetap 200 ms', () => {
+    // Regresi utama: dulu klaim ini naik ke 420 - 140 - 30 = 250 ms.
+    const { dNorm, flags } = normalizePress({ teamId: 'a', d: 200, u: 140, recvDelta: 420 });
+    expect(dNorm).toBe(200);
+    expect(flags).toContain('impossible_fast');
+    expect(MAX_FLOOR_ALLOWANCE_MS).toBe(150);
+  });
+});
+
+describe('pressNeedsReview', () => {
+  it('tekan bersih tidak perlu diperiksa', () => {
+    expect(pressNeedsReview([])).toBe(false);
+  });
+
+  it('flag apa pun menandai tekan untuk diperiksa operator', () => {
+    expect(pressNeedsReview(['late'])).toBe(true);
+    expect(pressNeedsReview(['impossible_fast'])).toBe(true);
+    expect(pressNeedsReview(['impossible_slow', 'clamped'])).toBe(true);
+  });
+});
+
+describe('pressWindow', () => {
+  const base = { now: 1_000, openAt: 900, closeAt: 1_200, awarded: false };
+
+  it('menerima tekan di dalam jendela', () => {
+    expect(pressWindow(base)).toEqual({ accept: true, late: false, reason: null });
+  });
+
+  it('menolak tekan sebelum tombol terbuka', () => {
+    expect(pressWindow({ ...base, now: 800 })).toEqual({ accept: false, late: false, reason: 'early' });
+  });
+
+  it('menerima kiriman tertunda sampai masa tenggang', () => {
+    const late = pressWindow({ ...base, now: base.closeAt + LATE_DELIVERY_GRACE_MS });
+    expect(late.accept).toBe(true);
+    expect(late.late).toBe(true);
+  });
+
+  it('menolak kiriman yang lewat masa tenggang', () => {
+    const expired = pressWindow({ ...base, now: base.closeAt + LATE_DELIVERY_GRACE_MS + 1 });
+    expect(expired).toEqual({ accept: false, late: true, reason: 'closed' });
+  });
+
+  it('masa tenggang bisa diatur dan nol berarti sama dengan close_at', () => {
+    expect(pressWindow({ ...base, now: 1_201, graceMs: 0 }).accept).toBe(false);
+    expect(pressWindow({ ...base, now: 1_201, graceMs: 500 }).accept).toBe(true);
+  });
+
+  it('ronde yang sudah dinilai tidak menerima tekan walau masih di jendela', () => {
+    expect(pressWindow({ ...base, awarded: true })).toEqual({ accept: false, late: false, reason: 'awarded' });
+  });
+
+  it('tanpa close_at (ronde belum ditutup) tekan diterima', () => {
+    expect(pressWindow({ ...base, closeAt: null, now: 10_000 })).toEqual({ accept: true, late: false, reason: null });
   });
 });
 
@@ -111,6 +174,23 @@ describe('rankPresses', () => {
     const result = rankPresses([press('a', 200), press('b', 275)], 0);
     expect(result.ranking[0].gapMs).toBe(0);
     expect(result.ranking[1].gapMs).toBe(75);
+  });
+
+  it('needsReview diteruskan per baris', () => {
+    const result = rankPresses([press('a', 200), { teamId: 'b', d: -40, u: 0, recvDelta: 120 }], 0);
+    const byTeam = new Map(result.ranking.map((row) => [row.teamId, row]));
+    expect(byTeam.get('a')?.needsReview).toBe(false);
+    expect(byTeam.get('b')?.needsReview).toBe(true);
+  });
+});
+
+describe('requiresExplicitChoice', () => {
+  it('butuh teamId dan explicit true', () => {
+    expect(requiresExplicitChoice({})).toBe(true);
+    expect(requiresExplicitChoice({ teamId: 't1' })).toBe(true);
+    expect(requiresExplicitChoice({ teamId: 't1', explicit: false })).toBe(true);
+    expect(requiresExplicitChoice({ teamId: '', explicit: true })).toBe(true);
+    expect(requiresExplicitChoice({ teamId: 't1', explicit: true })).toBe(false);
   });
 });
 

@@ -26,8 +26,19 @@ function snapshot(): Snapshot {
     round: { id: 'r1', seq: 3, status: 'open', awardedTeamId: null, result: null, points: 100 },
     attempt: null,
     ranking: [
-      { teamId: 't1', name: 'Alfa', rank: 1, dNorm: 180.4, dRaw: 180.4, u: 10, flags: [], gapMs: 0 },
-      { teamId: 't2', name: '=2+2', rank: 2, dNorm: 205, dRaw: -40, u: 10, flags: ['impossible_fast'], gapMs: 24.6 },
+      { teamId: 't1', name: 'Alfa', rank: 1, dNorm: 180.4, dRaw: 180.4, u: 10, flags: [], gapMs: 0, deliveryMs: 18, needsReview: false },
+      {
+        teamId: 't2',
+        name: '=2+2',
+        rank: 2,
+        dNorm: 205,
+        dRaw: 205,
+        u: 10,
+        flags: ['impossible_fast', 'late'],
+        gapMs: 24.6,
+        deliveryMs: 840,
+        needsReview: true,
+      },
     ],
     tie: false,
     tiedTeamIds: [],
@@ -103,7 +114,7 @@ describe('buildWorkbook', () => {
     expect(sheet.getCell(5, 1).value).toBe(1);
     expect(sheet.getCell(5, 2).value).toBe('Alfa');
     expect(sheet.getCell(5, 3).value).toBe(180.4);
-    expect(sheet.getCell(6, 7).value).toBe('klaim terlalu cepat');
+    expect(sheet.getCell(6, 7).value).toBe('klaim terlalu cepat · tiba setelah tombol ditutup · jaringan +840 ms');
   });
 
   it('snapshot kosong tetap menghasilkan berkas yang bisa dibaca', async () => {

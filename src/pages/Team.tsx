@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ServerMessage } from '@shared/protocol';
 import { clearTeamSession, loadTeamSession } from '../lib/storage';
+import { ApiError, api } from '../lib/api';
 import { useEventSocket } from '../hooks/useEventSocket';
 import { AppFooter, Chip, ConfirmDialog, LinkButton, PageLoader, navigate } from '../components/ui';
 import { requestScreenWakeLock, vibrate, wakeLockSupported } from '../lib/device';
+import { clearPressTicket, loadPressTicket, pressTicketRemainingMs, savePressTicket, type PressTicket } from '../lib/pressQueue';
 
 type Phase = 'idle' | 'arming' | 'live' | 'sent' | 'done';
 
@@ -28,13 +30,29 @@ export function Team() {
   const offsetRef = useRef(0);
   const syncedRef = useRef(false);
   const uRef = useRef(0);
+  const ticketRef = useRef<PressTicket | null>(null);
+  const [queued, setQueued] = useState(false);
   const wakeRef = useRef<{ release: () => Promise<void>; released: boolean } | null>(null);
 
   useEffect(() => {
     if (!session) navigate('/');
   }, [session]);
 
+  const clearPending = useCallback(() => {
+    const ticket = ticketRef.current;
+    ticketRef.current = null;
+    clearPressTicket(ticket?.attemptId);
+    setQueued(false);
+  }, []);
+
   const arm = useCallback((attempt: { id: string; nonce: string; openAt: number }) => {
+    // Tiket ronde sebelumnya tidak boleh ikut terkirim ke ronde baru.
+    const pending = ticketRef.current;
+    if (pending && pending.attemptId !== attempt.id) {
+      ticketRef.current = null;
+      clearPressTicket(pending.attemptId);
+      setQueued(false);
+    }
     attemptRef.current = { id: attempt.id, nonce: attempt.nonce, openAt: attempt.openAt };
     pressedRef.current = false;
     setDelta(null);
@@ -53,16 +71,23 @@ export function Team() {
         return;
       }
       if (message.type === 'press.ack') {
+        clearPending();
         if (message.status === 'received') {
           setPhase('sent');
           setNotice('Tekanan diterima. Menunggu hasil…');
         } else if (message.status === 'dup') {
           setNotice('Tekanan ini sudah tercatat. Satu tekan per tim.');
+        } else {
+          pressedRef.current = false;
+          setPhase('live');
+          setNotice('Tekanan belum diterima server. Tekan lagi bila tombol masih terbuka.');
         }
         return;
       }
       if (message.type === 'press.rejected') {
+        clearPending();
         if (message.status === 'early') {
+          pressedRef.current = false;
           setPhase('live');
           setNotice('Belum terbuka. Tekan setelah tombol hijau.');
         } else if (message.status === 'closed') {
@@ -75,6 +100,7 @@ export function Team() {
         return;
       }
       if (message.type === 'attempt.ranked') {
+        clearPending();
         const me = session ? message.ranking.find((r) => r.teamId === session.teamId) : undefined;
         const winner = message.ranking[0];
         setPhase('done');
@@ -104,6 +130,7 @@ export function Team() {
         return;
       }
       if (message.type === 'round.settled') {
+        clearPending();
         const awarded = message.round?.awardedTeamId;
         const mine = session && awarded === session.teamId;
         setPhase('done');
@@ -115,6 +142,7 @@ export function Team() {
         return;
       }
       if (message.type === 'round.void') {
+        clearPending();
         setPhase('idle');
         setOpenAt(null);
         setHeadline('');
@@ -124,13 +152,13 @@ export function Team() {
       }
       if (message.type === 'hello.err') {
         setNotice(message.code === 'kicked' ? 'Dikeluarkan operator.' : message.message);
-        if (message.code === 'bad_token' || message.code === 'no_team' || message.code === 'kicked') {
+        if (message.code === 'bad_token' || message.code === 'no_team' || message.code === 'kicked' || message.code === 'deleted') {
           clearTeamSession();
-          setTimeout(() => navigate('/'), 1500);
+          setTimeout(() => navigate('/'), message.code === 'deleted' ? 1200 : 1500);
         }
       }
     },
-    [arm, session],
+    [arm, clearPending, session],
   );
 
   function setAttemptless(text: string) {
@@ -152,6 +180,28 @@ export function Team() {
   offsetRef.current = socket.clock.offset;
   syncedRef.current = socket.clock.synced;
   uRef.current = Number.isFinite(socket.clock.u) ? socket.clock.u : 0;
+  const sendRef = useRef(socket.send);
+  sendRef.current = socket.send;
+
+  /**
+   * Kirim ulang tiket yang tersimpan. `send` mengembalikan false saat socket
+   * tertutup, jadi tiket tetap di perangkat sampai server benar-benar menjawab.
+   */
+  const flush = useCallback(() => {
+    const ticket = ticketRef.current;
+    if (!ticket) return;
+    if (pressTicketRemainingMs(ticket) <= 0) {
+      ticketRef.current = null;
+      clearPressTicket(ticket.attemptId);
+      pressedRef.current = false;
+      setQueued(false);
+      setPhase((current) => (current === 'sent' ? 'live' : current));
+      setNotice('Kiriman kedaluwarsa. Tekan ulang bila tombol masih terbuka.');
+      return;
+    }
+    const sent = sendRef.current({ type: 'press', attemptId: ticket.attemptId, nonce: ticket.nonce, d: ticket.d, u: ticket.u });
+    setNotice(sent ? 'Terkirim. Menunggu jawaban server…' : 'Belum tersambung. Tekanan disimpan dan dikirim otomatis.');
+  }, []);
 
   // Server tidak pernah mengirim snapshot bila kode lomba salah atau lombanya sudah
   // dihapus. Setelah beberapa detik beri jalan keluar, jangan biarkan loader abadi.
@@ -194,12 +244,29 @@ export function Team() {
     }
   }, [socket.snapshot, arm, phase]);
 
+  // Lomba bisa dihapus saat perangkat sedang terputus; percobaan menyambung
+  // ulang akan ditolak karena kodenya tidak lagi dikenal. Cek lewat HTTP supaya
+  // peserta tidak menggantung di layar rebutan, lalu keluar ke halaman daftar.
+  useEffect(() => {
+    if (!session || socket.status !== 'closed' || !socket.snapshot) return;
+    const timer = setInterval(() => {
+      api(`/api/public/events/${session.eventCode}`).catch((error: unknown) => {
+        if (error instanceof ApiError && error.status === 404) {
+          clearTeamSession();
+          navigate('/');
+        }
+      });
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [session, socket.status, socket.snapshot]);
+
   const press = useCallback(() => {
     const attempt = attemptRef.current;
-    if (!attempt || socket.status !== 'open') {
-      setNotice('Belum tersambung. Tunggu tanda hijau.');
+    if (!attempt) {
+      setNotice('Belum ada ronde. Menunggu operator membuka tombol.');
       return;
     }
+    if (pressedRef.current || ticketRef.current) return;
     if (!syncedRef.current) {
       setNotice('Perangkat belum siap. Coba lagi sebentar.');
       return;
@@ -211,13 +278,41 @@ export function Team() {
       setNotice('Belum terbuka. Tekan setelah tombol hijau.');
       return;
     }
-    if (pressedRef.current) return;
     pressedRef.current = true;
+    const ticket: PressTicket = { attemptId: attempt.id, nonce: attempt.nonce, d, u: uRef.current, createdAt: Date.now() };
+    // Catat dulu, kirim kemudian: jaringan putus tidak boleh menghapus tekan.
+    ticketRef.current = ticket;
+    savePressTicket(ticket);
     vibrate(18);
     setPhase('sent');
     setNotice('Mengirim…');
-    socket.send({ type: 'press', attemptId: attempt.id, nonce: attempt.nonce, d, u: uRef.current });
-  }, [socket]);
+    setQueued(true);
+  }, []);
+
+  // Kirim ulang tiap 700 ms sampai server menjawab. Tombol tidak menunggu
+  // socket terbuka, karena tekanannya sudah tersimpan di perangkat.
+  useEffect(() => {
+    if (!queued) return;
+    flush();
+    const timer = setInterval(flush, 700);
+    return () => clearInterval(timer);
+  }, [queued, flush]);
+
+  // Socket baru tersambung: jangan menunggu satu interval lagi.
+  useEffect(() => {
+    if (socket.status === 'open' && ticketRef.current) flush();
+  }, [socket.status, flush]);
+
+  // Tiket dari halaman sebelumnya (reload saat jaringan putus) dilanjutkan.
+  useEffect(() => {
+    const ticket = loadPressTicket();
+    if (!ticket || pressedRef.current) return;
+    ticketRef.current = ticket;
+    pressedRef.current = true;
+    setPhase('sent');
+    setQueued(true);
+    setNotice('Mengirim ulang tekanan yang tersimpan…');
+  }, []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -330,9 +425,15 @@ export function Team() {
         </div>
       ) : null}
 
+      {socket.snapshot?.event.status === 'finished' ? (
+        <div className="border-b border-line bg-panel px-4 py-2 text-[12px] text-ink/60">
+          Lomba sudah selesai. Terima kasih sudah bertanding.
+        </div>
+      ) : null}
+
       {socket.status === 'closed' ? (
         <div className="flex items-center justify-between gap-3 border-b border-danger/40 bg-danger/10 px-4 py-2 text-[12px] text-danger">
-          <span>Sambungan terputus. Tekan tidak dinilai.</span>
+          <span>Sambungan terputus. Tekanan disimpan di perangkat dan dikirim otomatis.</span>
           <button type="button" className="btn btn-danger h-7 min-h-0 px-2 py-0 text-[11px]" onClick={socket.reconnect}>
             Sambung ulang
           </button>

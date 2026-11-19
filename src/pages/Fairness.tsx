@@ -2,7 +2,7 @@ import { AppFooter, LinkButton, Panel } from '../components/ui';
 
 const SOURCES = [
   ['Layar sentuh', 'Tiap HP butuh waktu berbeda mengenali sentuhan.'],
-  ['Jaringan internet', 'Tidak dipakai menilai; hanya menentukan kapan kiriman sampai.'],
+  ['Jaringan internet', 'Tidak dipakai menilai. Bila kiriman tertunda, tekanan disimpan di HP dan dikirim ulang otomatis.'],
   ['Jam perangkat', 'Tidak dipakai menilai. Jam HP boleh beda jauh; waktu disamakan aplikasi ke jam panitia.'],
 ];
 
@@ -63,6 +63,13 @@ export function Fairness() {
             <p className="mt-1">
               Bila dua tekan terlalu berdekatan, hasilnya ditandai <span className="text-gold">seri</span>. Operator memutuskan: ulangi
               ronde atau pilih satu tim.
+            </p>
+          </div>
+          <div>
+            <div className="label">kiriman tertunda</div>
+            <p className="mt-1">
+              Bila sambungan putus tepat saat menekan, HP menyimpan tekanannya lalu mengirim ulang otomatis hingga 90 detik. Kiriman
+              yang baru tiba setelah tombol ditutup ditandai agar diperiksa operator — tidak otomatis menang, tidak otomatis gugur.
             </p>
           </div>
           <div>

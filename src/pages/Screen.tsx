@@ -39,7 +39,21 @@ export function ScreenBoard() {
     void probe(activeCode);
   }, [activeCode, probe]);
 
-  const socket = useEventSocket({ code: activeCode ?? undefined, role: 'screen', enabled: !missing });
+  const socket = useEventSocket({
+    code: activeCode ?? undefined,
+    role: 'screen',
+    enabled: !missing,
+    onMessage: (message) => {
+      // Lomba dihapus operator: layar kembali ke pintu masuk kode, jangan
+      // menampilkan klasemen lomba yang sudah tidak ada.
+      if (message.type === 'hello.err' && message.code === 'deleted') {
+        saveScreenCode('');
+        setActiveCode(null);
+        setInput('');
+        setMissing(false);
+      }
+    },
+  });
 
   // Lomba bisa dihapus saat layar sedang terbuka: socket putus, lalu dicek ulang.
   useEffect(() => {
@@ -108,6 +122,7 @@ export function ScreenBoard() {
           <Chip tone={lobby ? 'gold' : round?.status === 'open' ? 'signal' : 'default'}>
             {lobby ? 'pendaftaran dibuka' : round ? `ronde ${round.seq} · ${statusLabel(round.status)}` : 'belum ada ronde'}
           </Chip>
+          {status === 'finished' ? <Chip tone="gold">lomba selesai</Chip> : null}
           <Chip tone={missing ? 'danger' : socket.status === 'open' ? 'ok' : 'danger'}>
             {missing ? 'kode tidak dikenal' : socket.status === 'open' ? 'terhubung' : 'terputus'}
           </Chip>

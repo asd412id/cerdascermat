@@ -16,7 +16,7 @@ import {
   type Snapshot,
   type TeamPublic,
 } from '@shared/protocol';
-import { normalizePress, tieRequiresChoice } from '@shared/rank';
+import { normalizePress, pressNeedsReview, pressWindow, requiresExplicitChoice, tieRequiresChoice } from '@shared/rank';
 import type { Env } from './env';
 import { newId, normalizeCode, randomHex, sha256Hex, timingSafeEqual } from './auth';
 
@@ -212,16 +212,23 @@ export class EventDO extends DurableObject<Env> {
     const result = rankPresses(inputs, meta.tieMs);
     // dNorm dihitung ulang dari klaim tersimpan agar konsisten setelah tieMs berubah.
     const byTeam = new Map(presses.map((p) => [p.team_id, p]));
-    const ranking: RankingEntry[] = result.ranking.map((r) => ({
-      teamId: r.teamId,
-      name: teams.get(r.teamId)?.name ?? 'Tim',
-      rank: r.rank,
-      dNorm: Math.round(r.dNorm * 10) / 10,
-      dRaw: Math.round(r.dRaw * 10) / 10,
-      u: Math.round(r.u * 10) / 10,
-      flags: byTeam.get(r.teamId)?.flags ? (JSON.parse(byTeam.get(r.teamId)!.flags) as string[]) : r.flags,
-      gapMs: Math.round(r.gapMs * 10) / 10,
-    }));
+    const ranking: RankingEntry[] = result.ranking.map((r) => {
+      const stored = byTeam.get(r.teamId);
+      const flags = stored?.flags ? (JSON.parse(stored.flags) as string[]) : r.flags;
+      return {
+        teamId: r.teamId,
+        name: teams.get(r.teamId)?.name ?? 'Tim',
+        rank: r.rank,
+        dNorm: Math.round(r.dNorm * 10) / 10,
+        dRaw: Math.round(r.dRaw * 10) / 10,
+        u: Math.round(r.u * 10) / 10,
+        flags,
+        gapMs: Math.round(r.gapMs * 10) / 10,
+        // Selisih waktu tiba dengan klaim = ongkos jaringan (plus galat offset).
+        deliveryMs: Math.round(((stored?.recv_ms ?? attempt.open_at) - attempt.open_at - (stored?.d_ms ?? r.dRaw)) * 10) / 10,
+        needsReview: r.needsReview || pressNeedsReview(flags),
+      };
+    });
     return { ranking, tie: result.tie, tiedTeamIds: result.tiedTeamIds };
   }
 
@@ -393,7 +400,12 @@ export class EventDO extends DurableObject<Env> {
       this.teamsTimer = null;
     }
     this.teamsDirty = false;
+    // Beri tahu lebih dulu: peserta, layar, dan admin lain harus tahu lombanya
+    // dihapus tanpa menunggu percobaan sambung ulang yang pasti gagal (kode
+    // sudah tidak dikenal), lalu keluar ke halaman daftar.
+    const deleted: ServerMessage = { type: 'hello.err', code: 'deleted', message: 'Lomba dihapus operator.' };
     for (const ws of this.ctx.getWebSockets()) {
+      this.send(ws, deleted);
       try {
         ws.close(1001, 'event_deleted');
       } catch {
@@ -654,24 +666,33 @@ export class EventDO extends DurableObject<Env> {
       this.send(ws, { type: 'press.rejected', attemptId, status: 'closed', message: 'Ronde ini sudah berpindah. Tunggu tombol berikutnya.' });
       return;
     }
-    if (attempt.status !== 'open') {
-      this.send(ws, { type: 'press.rejected', attemptId, status: 'closed', message: 'Ronde sudah ditutup.' });
-      return;
-    }
-    const now = Date.now();
-    // Alarm penutup bisa tertunda; jangan pernah menerima tekan setelah close_at.
-    if (attempt.close_at !== null && now >= attempt.close_at) {
-      this.closeAttempt(attempt.id);
-      this.send(ws, { type: 'press.rejected', attemptId, status: 'closed', message: 'Ronde sudah ditutup.' });
-      return;
-    }
-    if (now < attempt.open_at) {
-      this.send(ws, { type: 'press.rejected', attemptId, status: 'early', message: 'Tombol belum terbuka. Tunggu warna hijau.' });
-      return;
-    }
+
+    // Duplikat diperiksa lebih dulu: kiriman ulang setelah jaringan putus harus
+    // dijawab `dup` (idempoten), bukan ditolak karena jendelanya sudah lewat.
     const duplicate = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM presses WHERE attempt_id = ? AND team_id = ?', attempt.id, teamId).one();
     if (duplicate.n > 0) {
       this.send(ws, { type: 'press.ack', attemptId, status: 'dup' });
+      return;
+    }
+
+    const now = Date.now();
+    const round = this.latestRound();
+    const awarded =
+      !round || round.id !== attempt.round_id || round.status !== 'open' || attempt.status === 'settled' || attempt.status === 'void';
+    const gate = pressWindow({ now, openAt: attempt.open_at, closeAt: attempt.close_at, awarded });
+    if (!gate.accept) {
+      if (gate.reason === 'early') {
+        this.send(ws, { type: 'press.rejected', attemptId, status: 'early', message: 'Tombol belum terbuka. Tunggu warna hijau.' });
+        return;
+      }
+      // Alarm penutup bisa tertunda; tutup attempt yang telanjur lewat jendela.
+      if (gate.reason === 'closed' && attempt.status === 'open') this.closeAttempt(attempt.id);
+      this.send(ws, {
+        type: 'press.rejected',
+        attemptId,
+        status: 'closed',
+        message: gate.reason === 'awarded' ? 'Ronde sudah dinilai.' : 'Tombol sudah ditutup.',
+      });
       return;
     }
 
@@ -685,12 +706,11 @@ export class EventDO extends DurableObject<Env> {
     // diakui operator supaya klien tidak bisa menggelembungkannya.
     const u = Math.min(meta.readyMaxUMs, Math.max(0, Number(message.u) || 0));
     const recvDelta = now - attempt.open_at;
-    const normalized = normalizePress({
-      teamId,
-      d: Number(message.d) || 0,
-      u,
-      recvDelta,
-    });
+    const claim = Number(message.d);
+    const normalized = normalizePress({ teamId, d: claim, u, recvDelta });
+    // Klaim tidak pernah dinaikkan; kiriman yang tiba setelah tombol ditutup
+    // hanya ditandai supaya operator memeriksanya.
+    const flags = gate.late ? [...normalized.flags, 'late' as const] : normalized.flags;
     const ordinal = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM presses WHERE attempt_id = ?', attempt.id).one().n + 1;
     this.sql.exec(
       `INSERT INTO presses (id, attempt_id, team_id, d_ms, d_norm_ms, u_ms, recv_ms, flags, ordinal)
@@ -698,26 +718,47 @@ export class EventDO extends DurableObject<Env> {
       newId('prs'),
       attempt.id,
       teamId,
-      Number(message.d) || 0,
+      Number.isFinite(claim) ? claim : recvDelta,
       normalized.dNorm,
       u,
       now,
-      JSON.stringify(normalized.flags),
+      JSON.stringify(flags),
       ordinal,
     );
 
     this.send(ws, { type: 'press.ack', attemptId, status: 'received' });
 
-    if (ordinal === 1) {
-      const closeAt = now + meta.decisionMs;
-      this.sql.exec('UPDATE round_attempts SET close_at = ? WHERE id = ?', closeAt, attempt.id);
-      await this.ctx.storage.setAlarm(closeAt);
+    if (attempt.status === 'open') {
+      if (ordinal === 1) {
+        const closeAt = now + meta.decisionMs;
+        this.sql.exec('UPDATE round_attempts SET close_at = ? WHERE id = ?', closeAt, attempt.id);
+        await this.ctx.storage.setAlarm(closeAt);
+      }
+      const onlineTeams = this.teams().filter((t) => this.isOnline(t.id)).length;
+      if (ordinal >= onlineTeams && onlineTeams > 0) {
+        this.closeAttempt(attempt.id);
+      }
+      return;
     }
 
-    const onlineTeams = this.teams().filter((t) => this.isOnline(t.id)).length;
-    if (ordinal >= onlineTeams && onlineTeams > 0) {
-      this.closeAttempt(attempt.id);
-    }
+    // Attempt sudah ditutup: tekan yang baru tiba mengubah urutan, jadi hasil
+    // yang sudah tampil di layar operator harus disiarkan ulang.
+    const fresh = this.sql.exec<AttemptRow>('SELECT * FROM round_attempts WHERE id = ?', attempt.id).toArray()[0];
+    if (fresh) this.broadcastRanked(fresh);
+  }
+
+  private broadcastRanked(attempt: AttemptRow): void {
+    const { ranking, tie, tiedTeamIds } = this.attemptRanking(attempt);
+    const candidateIdx = ranking.length === 0 ? 0 : Math.min(attempt.candidate_idx, ranking.length - 1);
+    this.broadcast({
+      type: 'attempt.ranked',
+      attemptId: attempt.id,
+      ranking,
+      tie,
+      tiedTeamIds,
+      candidateIdx,
+      candidateTeamId: ranking[candidateIdx]?.teamId ?? null,
+    });
   }
 
   private closeAttempt(attemptId: string): void {
@@ -725,17 +766,7 @@ export class EventDO extends DurableObject<Env> {
     if (!attempt || attempt.status !== 'open') return;
     const now = Date.now();
     this.sql.exec("UPDATE round_attempts SET status = 'closed', close_at = COALESCE(close_at, ?) WHERE id = ?", now, attemptId);
-    const fresh = { ...attempt, status: 'closed' as const, close_at: attempt.close_at ?? now };
-    const { ranking, tie, tiedTeamIds } = this.attemptRanking(fresh);
-    this.broadcast({
-      type: 'attempt.ranked',
-      attemptId,
-      ranking,
-      tie,
-      tiedTeamIds,
-      candidateIdx: 0,
-      candidateTeamId: ranking[0]?.teamId ?? null,
-    });
+    this.broadcastRanked({ ...attempt, status: 'closed' as const, close_at: attempt.close_at ?? now });
   }
 
   async alarm(): Promise<void> {
@@ -790,6 +821,7 @@ export class EventDO extends DurableObject<Env> {
 
     switch (body.action) {
       case 'open_round': {
+        if (meta.status === 'finished') return this.json({ error: 'event_finished', message: 'Lomba sudah selesai.' }, 409);
         const current = this.latestRound();
         const openAttempt = current && current.status === 'open' ? this.latestAttempt(current.id) : null;
         if (current && current.status === 'open' && openAttempt?.status === 'open') {
@@ -838,6 +870,15 @@ export class EventDO extends DurableObject<Env> {
             409,
           );
         const teamId = String(payload.teamId ?? (attempt ? this.candidateTeamId(attempt, ranking) : '') ?? '');
+        // Tekan yang tiba lewat jaringan lambat (atau klaimnya mustahil) juga
+        // wajib dipilih eksplisit: server tidak boleh memberi poin diam-diam
+        // berdasarkan urutan abjad.
+        const chosen = ranking.find((row) => row.teamId === teamId);
+        if (chosen?.needsReview && requiresExplicitChoice(payload))
+          return this.json(
+            { error: 'press_requires_review', message: 'Tekanan ini perlu diperiksa operator — pilih tim pemenang lebih dulu.' },
+            409,
+          );
         const team = this.sql.exec<TeamRow>('SELECT * FROM teams WHERE id = ?', teamId).toArray()[0];
         if (!team) return this.json({ error: 'team_not_found' }, 404);
         const points = Math.max(0, Math.floor(Number(payload.points ?? round.points ?? meta.pointsPerRound)));
@@ -947,12 +988,31 @@ export class EventDO extends DurableObject<Env> {
 
       case 'start_event': {
         if (meta.status === 'live') return this.json({ error: 'already_started' }, 409);
+        if (meta.status === 'finished') return this.json({ error: 'already_finished', message: 'Lomba sudah selesai.' }, 409);
         const next = this.saveMeta({ status: 'live' });
         this.audit(adminId, 'start_event', { teams: this.teams().length });
         this.broadcast({ type: 'event.updated', event: next });
         this.broadcast({ type: 'state', snapshot: this.snapshot('admin') }, { roles: ['admin'] });
         this.broadcast({ type: 'state', snapshot: this.snapshot('screen') }, { roles: ['screen', 'team'] });
         return this.json({ ok: true, event: next });
+      }
+
+      case 'finish_event': {
+        if (meta.status === 'finished') return this.json({ error: 'already_finished', message: 'Lomba sudah selesai.' }, 409);
+        const round = this.latestRound();
+        const openRound = round && round.status === 'open' ? round : null;
+        if (openRound) {
+          // Ronde tanpa pemenang dicatat batal, bukan dihapus: riwayat tetap utuh.
+          this.sql.exec("UPDATE rounds SET status = 'void', result = 'void' WHERE id = ?", openRound.id);
+          this.sql.exec("UPDATE round_attempts SET status = 'void' WHERE round_id = ? AND status IN ('open','closed')", openRound.id);
+          this.broadcast({ type: 'round.void', round: this.roundInfo(openRound.id) });
+        }
+        const next = this.saveMeta({ status: 'finished' });
+        this.audit(adminId, 'finish_event', { teams: this.teams().length, roundSeq: openRound?.seq ?? null });
+        this.broadcast({ type: 'event.updated', event: next });
+        this.broadcast({ type: 'state', snapshot: this.snapshot('admin') }, { roles: ['admin'] });
+        this.broadcast({ type: 'state', snapshot: this.snapshot('screen') }, { roles: ['screen', 'team'] });
+        return this.json({ ok: true, event: next, voidedRound: openRound?.seq ?? null });
       }
 
       case 'kick_team': {

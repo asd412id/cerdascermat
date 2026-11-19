@@ -22,6 +22,7 @@ const EVENT_STATUS: Record<string, string> = {
   open: 'pendaftaran dibuka',
   live: 'berlangsung',
   closed: 'ditutup',
+  finished: 'selesai',
 };
 
 const ROUND_STATUS: Record<string, string> = {
@@ -34,6 +35,7 @@ const ROUND_STATUS: Record<string, string> = {
 const FLAG_LABEL: Record<string, string> = {
   impossible_fast: 'klaim terlalu cepat',
   impossible_slow: 'klaim terlalu lambat',
+  late: 'tiba setelah tombol ditutup',
   clamped: 'dikoreksi server',
 };
 
@@ -48,6 +50,7 @@ const ACTION_LABEL: Record<string, string> = {
   set_display_mode: 'Mode papan skor diubah',
   set_status: 'Pendaftaran diubah',
   start_event: 'Lomba dimulai',
+  finish_event: 'Lomba diselesaikan',
   kick_team: 'Tim dikeluarkan',
 };
 
@@ -302,6 +305,9 @@ function roundSheet(workbook: import('exceljs').Workbook, snap: Snapshot): void 
     const row = ws.getRow(5 + index);
     const flags = entry.flags.map((f) => FLAG_LABEL[f] ?? f);
     if (tied.has(entry.teamId)) flags.unshift('seri teknis');
+    // Ongkos jaringan: selisih waktu tiba dengan klaim reaksi. Bukan penilaian,
+    // hanya penjelas kenapa sebuah tekan perlu diperiksa operator.
+    if (entry.deliveryMs >= 250) flags.push(`jaringan +${Math.round(entry.deliveryMs)} ms`);
 
     row.getCell(1).value = entry.rank;
     row.getCell(2).value = entry.name;

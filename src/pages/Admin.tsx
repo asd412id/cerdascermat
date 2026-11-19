@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import type { AuditEntry, EventMeta, Snapshot, TeamPublic } from '@shared/protocol';
+import { tieMargin } from '@shared/rank';
 import { ApiError, api } from '../lib/api';
 import { clearAdminToken, loadAdminEventId, loadAdminToken, saveAdminEventId, saveAdminToken } from '../lib/storage';
 import { useEventSocket } from '../hooks/useEventSocket';
@@ -25,6 +26,7 @@ const AUDIT_LABEL: Record<string, string> = {
   set_display_mode: 'Mode papan skor diubah',
   set_status: 'Pendaftaran diubah',
   start_event: 'Lomba dimulai',
+  finish_event: 'Lomba diselesaikan',
   kick_team: 'Tim dikeluarkan',
 };
 /** Ubah catatan audit menjadi satu kalimat yang bisa dibaca operator. */
@@ -192,6 +194,7 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
   const [accountError, setAccountError] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmFinish, setConfirmFinish] = useState(false);
   const [confirmKick, setConfirmKick] = useState<{ id: string; name: string } | null>(null);
   /** Kandidat yang dipilih operator saat terjadi seri; terikat ke attempt tertentu. */
   const [tiePick, setTiePick] = useState<{ attemptId: string; teamId: string } | null>(null);
@@ -226,7 +229,18 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
     token,
     enabled: Boolean(selected),
     onMessage: (message) => {
-      if (message.type === 'hello.err') setError(message.message);
+      if (message.type !== 'hello.err') return;
+      // Lomba dihapus operator lain: jangan tinggalkan konsol menempel pada data
+      // yang sudah tidak ada. Kembali ke daftar lomba.
+      if (message.code === 'deleted') {
+        setError('');
+        setNotice('Lomba ini dihapus. Pilih atau buat lomba lain.');
+        setSelectedId(null);
+        setTiePick(null);
+        void loadEvents();
+        return;
+      }
+      setError(message.message);
     },
   });
 
@@ -414,7 +428,20 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
   /** Pilihan seri hanya berlaku untuk attempt yang sedang berjalan. */
   const tieChoice = tiePick && attempt && tiePick.attemptId === attempt.id ? tiePick.teamId : null;
   const tie = snapshot?.tie === true;
-  const needsTieChoice = tie && !tieChoice;
+  const candidateRow = ranking.find((row) => row.teamId === candidateId) ?? null;
+  /** Tekan yang tiba lewat jaringan lambat wajib dikonfirmasi seperti seri. */
+  const reviewRequired = candidateRow?.needsReview === true;
+  const needsChoice = tie || reviewRequired;
+  /** Pilihan eksplisit sah hanya bila mengunci kandidat yang sedang aktif. */
+  const choiceConfirmed = tieChoice !== null && tieChoice === candidateId;
+  const needsPick = needsChoice && !choiceConfirmed;
+  /** Batas ketelitian seri: tieMs + ketidakpastian kedua penekan. */
+  const tieMarginMs =
+    snapshot && snapshot.ranking.length > 1
+      ? Math.round(tieMargin(snapshot.event.tieMs, snapshot.ranking[0].u, snapshot.ranking[1].u))
+      : 0;
+  /** Lomba ditutup operator: riwayat tetap ada dan lomba boleh dihapus. */
+  const finished = snapshot?.event.status === 'finished';
   const allReady = teams.length > 0 && ready.size === teams.length;
   const registrationOpen = snapshot?.event.status === 'open';
   /** Lomba berjalan hanya setelah operator menekan "Mulai lomba". */
@@ -429,6 +456,7 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
         <div className="flex min-w-0 items-baseline gap-3">
           <span className="font-display text-[14px] tracking-[0.06em] uppercase">Cerdas Cermat 2026</span>
           {selected ? <span className="num chip text-[12px] tracking-[0.2em] text-signal">{selected.code}</span> : null}
+          {finished ? <Chip tone="gold">lomba selesai</Chip> : null}
         </div>
         <div className="ml-auto flex min-w-0 flex-wrap items-center gap-2 text-[11px]">
           <span className="num text-ink/55">
@@ -657,11 +685,23 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
                         Buka pendaftaran
                       </button>
                     )}
+                    {started ? (
+                      <button
+                        type="button"
+                        className="btn h-9 min-h-0"
+                        disabled={busy !== null}
+                        onClick={() => setConfirmFinish(true)}
+                      >
+                        {busy === 'finish_event' ? 'menyelesaikan…' : 'Selesai'}
+                      </button>
+                    ) : null}
                   </div>
                   <p className="text-[11px] text-ink/50">
-                    {registrationOpen
-                      ? 'Peserta memindai QR di layar untuk mendaftar. Salah masuk? Keluarkan lewat tabel di bawah.'
-                      : 'Pendaftaran ditutup. Peserta baru ditolak server sampai pendaftaran dibuka lagi.'}
+                    {finished
+                      ? 'Lomba selesai. Skor, riwayat ronde, dan laporan tetap tersimpan; lomba bisa dihapus kapan saja.'
+                      : registrationOpen
+                        ? 'Peserta memindai QR di layar untuk mendaftar. Salah masuk? Keluarkan lewat tabel di bawah.'
+                        : 'Pendaftaran ditutup. Peserta baru ditolak server sampai pendaftaran dibuka lagi.'}
                   </p>
                 </div>
               </Panel>
@@ -679,7 +719,18 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
               >
                 {snapshot?.tie ? (
                   <div className="border-b border-gold/40 bg-gold/10 px-3 py-2 text-[12px] text-gold">
-                    Seri: selisih dua tekan terlalu kecil. Pilih kandidat yang menang (tombol “kandidat”) sebelum memberi poin.
+                    Seri: selisih {Math.round(ranking[1]?.gapMs ?? 0)} ms masih di bawah batas ketelitian {tieMarginMs} ms. Tekan
+                    “pilih ini” pada tim yang menang, lalu beri poin.
+                  </div>
+                ) : reviewRequired && candidateRow ? (
+                  <div className="border-b border-gold/40 bg-gold/10 px-3 py-2 text-[12px] text-gold">
+                    Tekanan {candidateRow.name} perlu diperiksa
+                    {candidateRow.flags.includes('late')
+                      ? ' karena baru tiba setelah batas waktu tombol'
+                      : candidateRow.deliveryMs >= 250
+                        ? ` karena jaringan lambat (tiba ${Math.round(candidateRow.deliveryMs)} ms setelah klaim)`
+                        : ' karena klaimnya di luar jendela fisika'}
+                    . Tekan “pilih ini” bila tekanannya sah, lalu beri poin.
                   </div>
                 ) : null}
                 {ranking.length === 0 ? (
@@ -718,20 +769,38 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
                               </td>
                               <td className="num px-3 py-2 text-ink/70">{row.rank === 1 ? '0 ms' : `+${Math.round(row.gapMs)} ms`}</td>
                               <td className="hidden px-3 py-2 md:table-cell">
-                                {row.flags.length ? <span className="text-[11px] text-danger">perlu diperiksa</span> : <span className="text-ink/25">—</span>}
+                                {row.needsReview ? (
+                                  <span className="text-[11px] text-danger">
+                                    {row.flags.includes('late') ? 'tiba terlambat' : 'perlu diperiksa'}
+                                    {row.deliveryMs >= 250 ? ` · jaringan +${Math.round(row.deliveryMs)} ms` : ''}
+                                  </span>
+                                ) : row.deliveryMs >= 250 ? (
+                                  <span className="text-[11px] text-gold">jaringan +{Math.round(row.deliveryMs)} ms</span>
+                                ) : (
+                                  <span className="text-ink/25">—</span>
+                                )}
                               </td>
                               <td className="px-3 py-2 text-right whitespace-nowrap">
                                 <button
                                   type="button"
-                                  className="btn h-7 min-h-0 px-2 text-[10px] whitespace-nowrap"
-                                  disabled={busy !== null || row.teamId === candidateId}
-                                  title={`Jadikan ${row.name} kandidat aktif`}
+                                  className={`btn h-7 min-h-0 px-2 text-[10px] whitespace-nowrap ${isCandidate && needsPick ? 'btn-gold' : ''}`}
+                                  disabled={busy !== null || (isCandidate && !needsPick)}
+                                  title={
+                                    isCandidate && needsPick
+                                      ? `Pilih ${row.name} sebagai pemenang ronde ini`
+                                      : isCandidate
+                                        ? `${row.name} sudah menjadi kandidat`
+                                        : `Jadikan ${row.name} kandidat aktif`
+                                  }
                                   onClick={() => {
-                                    if (attempt) setTiePick({ attemptId: attempt.id, teamId: row.teamId });
-                                    void run('set_winner', { teamId: row.teamId });
+                                    if (!attempt) return;
+                                    setTiePick({ attemptId: attempt.id, teamId: row.teamId });
+                                    // Baris kandidat aktif hanya mengunci pilihan; yang lain
+                                    // sekaligus memindahkan kandidat ke tim itu.
+                                    if (!isCandidate) void run('set_winner', { teamId: row.teamId });
                                   }}
                                 >
-                                  kandidat
+                                  {isCandidate && needsPick ? 'pilih ini' : 'kandidat'}
                                 </button>
                               </td>
                             </tr>
@@ -745,12 +814,17 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
                   <button
                     type="button"
                     className="btn btn-gold"
-                    disabled={busy !== null || !round || round.status !== 'open' || !candidateId || needsTieChoice}
-                    title={needsTieChoice ? 'Hasil seri: pilih kandidat pemenang lebih dulu.' : undefined}
+                    disabled={busy !== null || !round || round.status !== 'open' || !candidateId || needsPick}
+                    title={
+                      needsPick
+                        ? tie
+                          ? 'Hasil seri: tekan “pilih ini” pada tim yang menang lebih dulu.'
+                          : 'Tekanan perlu diperiksa: tekan “pilih ini” pada tim yang menang lebih dulu.'
+                        : undefined
+                    }
                     onClick={async () => {
-                      const teamId = needsTieChoice ? null : tie ? tieChoice : candidateId;
-                      if (!teamId) return;
-                      const ok = await run('settle', tie ? { teamId, explicit: true } : { teamId });
+                      if (!candidateId || needsPick) return;
+                      const ok = await run('settle', needsChoice ? { teamId: candidateId, explicit: true } : { teamId: candidateId });
                       if (ok) {
                         setTiePick(null);
                         setNotice('Poin diberikan ke kandidat aktif.');
@@ -1083,6 +1157,27 @@ function Console({ token, me, onLogout }: { token: string; me: AdminSummary; onL
           busy={deleting}
           onCancel={() => setConfirmDelete(false)}
           onConfirm={() => void removeEvent()}
+        />
+      ) : null}
+
+      {confirmFinish ? (
+        <ConfirmDialog
+          title="Selesaikan lomba?"
+          message={
+            <>
+              Lomba ditutup: pendaftaran berhenti, ronde yang masih berjalan dibatalkan, dan peserta tidak bisa lagi menekan.
+              Skor, riwayat ronde, dan laporan tetap tersimpan. Setelah selesai, lomba bisa dihapus.
+            </>
+          }
+          confirmLabel={busy === 'finish_event' ? 'Menyelesaikan…' : 'Ya, selesaikan'}
+          confirmTone="primary"
+          busy={busy === 'finish_event'}
+          onCancel={() => setConfirmFinish(false)}
+          onConfirm={async () => {
+            const ok = await run('finish_event');
+            setConfirmFinish(false);
+            if (ok) setNotice('Lomba diselesaikan. Riwayat tersimpan dan lomba bisa dihapus.');
+          }}
         />
       ) : null}
 

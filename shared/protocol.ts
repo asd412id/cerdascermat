@@ -1,5 +1,5 @@
 export type Role = 'team' | 'admin' | 'screen';
-export type EventStatus = 'draft' | 'open' | 'live' | 'closed';
+export type EventStatus = 'draft' | 'open' | 'live' | 'closed' | 'finished';
 export type DisplayMode = 'top1' | 'all';
 export type AttemptStatus = 'open' | 'closed' | 'settled' | 'void';
 export type RoundStatus = 'idle' | 'open' | 'settled' | 'void';
@@ -56,6 +56,10 @@ export interface RankingEntry {
   u: number;
   flags: string[];
   gapMs: number;
+  /** perkiraan waktu tempuh kiriman (tiba - klaim), ms — tanda jaringan lambat */
+  deliveryMs: number;
+  /** tekan ini wajib dikonfirmasi operator sebelum diberi poin */
+  needsReview: boolean;
 }
 
 export interface Snapshot {
@@ -90,7 +94,7 @@ export type ClientMessage =
 
 export type ServerMessage =
   | { type: 'hello.ok'; role: Role; teamId?: string; appVersion: string; serverTime: number }
-  | { type: 'hello.err'; code: 'bad_role' | 'bad_token' | 'no_team' | 'version' | 'kicked'; message: string }
+  | { type: 'hello.err'; code: 'bad_role' | 'bad_token' | 'no_team' | 'version' | 'kicked' | 'deleted'; message: string }
   | { type: 'sync-ack'; seq: number; t0: number; t1: number; t2: number }
   | { type: 'pong'; t0: number; t1: number }
   | { type: 'state'; snapshot: Snapshot }

@@ -152,12 +152,18 @@ export class EventConnection {
     }
   }
 
-  send(message: ClientMessage): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+  /**
+   * `true` hanya bila frame benar-benar masuk ke socket. Pemanggil (antrean
+   * tekan) butuh jawaban ini untuk tahu kapan harus mencoba lagi.
+   */
+  send(message: ClientMessage): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
     try {
       this.ws.send(JSON.stringify(message));
+      return true;
     } catch {
       // biarkan onclose yang menangani
+      return false;
     }
   }
 

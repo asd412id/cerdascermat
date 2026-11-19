@@ -15,6 +15,8 @@ export function Join() {
   const [code, setCode] = useState('');
   const [lookup, setLookup] = useState<{ status: EventStatus; teams: number } | null>(null);
   const [looking, setLooking] = useState(false);
+  /** Nama lomba terbaru dari server; sesi lama bisa belum menyimpannya. */
+  const [freshName, setFreshName] = useState<string | null>(null);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -55,6 +57,27 @@ export function Join() {
   const [name, setName] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+
+  // Kartu riwayat harus menyebut lombanya, bukan hanya kode: nama bisa berubah
+  // setelah tim mendaftar, dan sesi lama belum punya `eventName` sama sekali.
+  const storedCode = existing?.eventCode ?? last?.eventCode ?? '';
+  useEffect(() => {
+    if (!storedCode) {
+      setFreshName(null);
+      return;
+    }
+    let alive = true;
+    api<{ event: { name: string } }>(`/api/public/events/${storedCode}`)
+      .then((response) => {
+        if (alive) setFreshName(response.event.name);
+      })
+      .catch(() => {
+        if (alive) setFreshName(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [storedCode]);
 
   const enter = (session: TeamSession) => {
     saveTeamSession(session);
@@ -112,11 +135,14 @@ export function Join() {
         <div className="mt-6 border border-line bg-panel p-4">
           <div className="label">Terdaftar di perangkat ini</div>
           <div className="mt-2 flex items-baseline justify-between gap-3">
-            <div>
-              <div className="font-display text-[20px] leading-tight">{existing.teamName}</div>
-              <div className="num mt-1 text-[12px] text-ink/55">
-                {existing.eventName} · {existing.eventCode}
-              </div>
+            <div className="min-w-0">
+              <div className="truncate font-display text-[20px] leading-tight">{existing.teamName}</div>
+              <dl className="mt-2 grid grid-cols-[3.5rem_1fr] gap-x-2 text-[12px]">
+                <dt className="label">lomba</dt>
+                <dd className="truncate text-ink/80">{freshName ?? existing.eventName ?? '—'}</dd>
+                <dt className="label mt-0.5">kode</dt>
+                <dd className="num mt-0.5 text-ink/55">{existing.eventCode}</dd>
+              </dl>
             </div>
             <StatusDot state="ok" />
           </div>
@@ -145,9 +171,12 @@ export function Join() {
           <div className="mt-2 flex items-baseline justify-between gap-3">
             <div className="min-w-0">
               <div className="truncate font-display text-[20px] leading-tight">{last.teamName}</div>
-              <div className="num mt-1 text-[12px] text-ink/55">
-                {last.eventName} · {last.eventCode}
-              </div>
+              <dl className="mt-2 grid grid-cols-[3.5rem_1fr] gap-x-2 text-[12px]">
+                <dt className="label">lomba</dt>
+                <dd className="truncate text-ink/80">{freshName ?? last.eventName ?? '—'}</dd>
+                <dt className="label mt-0.5">kode</dt>
+                <dd className="num mt-0.5 text-ink/55">{last.eventCode}</dd>
+              </dl>
             </div>
             <StatusDot state="ok" />
           </div>

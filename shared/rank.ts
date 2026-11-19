@@ -5,25 +5,36 @@
  * Server tidak membandingkan waktu terima; ia memvalidasi `d` terhadap
  * jendela fisika lalu memberi peringkat berdasarkan `dNorm`.
  *
- * Fisika: `recvDelta = d + up`, dengan `up` latensi satu arah. Server hanya
- * tahu `recvDelta`, jadi lantai jendela = recvDelta - up - slack. `u` adalah
- * taksiran klien untuk `up` (galat offset jam ≈ RTT/2), sehingga lantai
- * memakai `u` — tetap dijepit MAX_FLOOR_ALLOWANCE_MS supaya klien yang
- * membesar-besarkan `u` hanya mendapat kelonggaran sebesar plafon itu, bukan
- * waktu tanpa batas seperti sebelumnya.
+ * Aturan penting (lihat src/pages/Fairness.tsx): klaim klien TIDAK dinaikkan.
+ * Versi lama menaikkan `d` ke lantai fisika (`recvDelta - u - 30`), sehingga
+ * peserta dengan uplink lambat mendapat angka reaksi yang lebih buruk daripada
+ * klaimnya sendiri — jaringan ikut menilai, tepat yang dijanjikan tidak
+ * terjadi. Kini lantai fisika hanya memberi flag `impossible_fast` untuk
+ * diperiksa operator; `dNorm` memakai klaim apa adanya, dijepit 0..batas atas.
  */
 
 export const EARLY_SLACK_MS = 30;
 export const LATE_SLACK_MS = 30;
 
 /**
- * Plafon kelonggaran lantai jendela. Disamakan dengan ambang kesiapan default
- * (READY_MAX_U_MS = 150) supaya tim yang dinyatakan siap tidak dihukum diam-diam,
+ * Plafon kelonggaran jendela fisika. Disamakan dengan ambang kesiapan default
+ * (READY_MAX_U_MS = 150) supaya tim yang dinyatakan siap tidak dianggap mustahil,
  * sekaligus membatasi keuntungan klien yang memalsukan `u`.
  */
 export const MAX_FLOOR_ALLOWANCE_MS = 150;
 
-export type PressFlag = 'impossible_fast' | 'impossible_slow' | 'clamped';
+/**
+ * Masa tenggang kiriman tertunda. Peserta dengan uplink lambat atau yang
+ * sambungannya putus sesaat boleh menekan tepat saat tombol menyala, lalu
+ * kirimannya baru tiba setelah `close_at`. Selama operator belum memberi poin,
+ * tekan itu tetap diterima dan urutannya disiarkan ulang.
+ */
+export const LATE_DELIVERY_GRACE_MS = 20_000;
+
+export type PressFlag = 'impossible_fast' | 'impossible_slow' | 'late' | 'clamped';
+
+/** Flag yang membuat sebuah tekan wajib dikonfirmasi operator sebelum diberi poin. */
+const REVIEW_FLAGS = ['impossible_fast', 'impossible_slow', 'late', 'clamped'] as const;
 
 export interface PressRaw {
   teamId: string;
@@ -44,6 +55,8 @@ export interface RankedPress {
   dNorm: number;
   u: number;
   flags: PressFlag[];
+  /** tekan ini perlu konfirmasi operator sebelum diberi poin */
+  needsReview: boolean;
   /** selisih terhadap pemenang, ms */
   gapMs: number;
 }
@@ -57,6 +70,11 @@ export interface RankResult {
   marginMs: number;
 }
 
+/**
+ * Normalisasi klaim: hanya menjepit ke rentang yang mungkin (0 sampai batas
+ * atas fisika). Tidak pernah menaikkan klaim, karena itu menghukum peserta yang
+ * jarinya lebih cepat hanya gara-gara uplink-nya lambat.
+ */
 export function normalizePress(input: PressInput): { dNorm: number; flags: PressFlag[] } {
   const flags: PressFlag[] = [];
   const rawU = Number.isFinite(input.u) ? Math.max(0, input.u) : 0;
@@ -69,12 +87,51 @@ export function normalizePress(input: PressInput): { dNorm: number; flags: Press
     d = input.recvDelta;
     flags.push('clamped');
   }
+
+  // Klaim di bawah nol mustahil (sebelum tombol menyala), dan klaim di atas
+  // batas atas tidak bisa dipercaya. Keduanya ditandai, bukan "diperbaiki"
+  // dengan menaikkan klaim.
   if (d < travelFloor) flags.push('impossible_fast');
   if (d > travelCeil) flags.push('impossible_slow');
 
-  const clamped = Math.min(travelCeil, Math.max(travelFloor, d));
-  if (clamped !== d && !flags.includes('clamped')) flags.push('clamped');
-  return { dNorm: clamped, flags };
+  const dNorm = Math.min(travelCeil, Math.max(0, d));
+  if (dNorm !== d && !flags.includes('clamped')) flags.push('clamped');
+  return { dNorm, flags };
+}
+
+export function pressNeedsReview(flags: readonly string[]): boolean {
+  return flags.some((flag) => (REVIEW_FLAGS as readonly string[]).includes(flag));
+}
+
+export interface PressWindowInput {
+  now: number;
+  openAt: number;
+  closeAt: number | null;
+  /** ronde sudah diberi poin / dibatalkan — tidak menerima tekan lagi */
+  awarded: boolean;
+  graceMs?: number;
+}
+
+export interface PressWindowResult {
+  accept: boolean;
+  /** tiba setelah `close_at`; tetap sah tetapi wajib diperiksa operator */
+  late: boolean;
+  reason: 'early' | 'closed' | 'awarded' | null;
+}
+
+/**
+ * Jendela penerimaan tekan. Batasnya bukan lagi `close_at` semata: kiriman
+ * yang tertunda di jaringan tetap diterima sampai `close_at + graceMs` selama
+ * ronde belum dinilai.
+ */
+export function pressWindow(input: PressWindowInput): PressWindowResult {
+  const graceMs = Number.isFinite(input.graceMs) ? Math.max(0, Number(input.graceMs)) : LATE_DELIVERY_GRACE_MS;
+  if (input.awarded) return { accept: false, late: false, reason: 'awarded' };
+  if (input.now < input.openAt) return { accept: false, late: false, reason: 'early' };
+  if (input.closeAt !== null && input.now > input.closeAt + graceMs) {
+    return { accept: false, late: true, reason: 'closed' };
+  }
+  return { accept: true, late: input.closeAt !== null && input.now > input.closeAt, reason: null };
 }
 
 /** Selisih (b - a) bila menang a dan seri bila selisih <= TIE_MS + u_a + u_b. */
@@ -82,20 +139,24 @@ export function tieMargin(tieMs: number, uA: number, uB: number): number {
   return tieMs + Math.max(0, uA) + Math.max(0, uB);
 }
 
+/** Operator harus mengirim `teamId` pilihan sendiri beserta `explicit: true`. */
+export function requiresExplicitChoice(payload: { teamId?: unknown; explicit?: unknown }): boolean {
+  return typeof payload.teamId !== 'string' || payload.teamId.length === 0 || payload.explicit !== true;
+}
+
 /**
- * Seri teknis tidak boleh diputuskan server: operator harus mengirim `teamId`
- * pilihan sendiri beserta `explicit: true`. Tanpa itu kandidat default (urutan
- * abjad ranking) menang tanpa pernah dipilih siapa pun.
+ * Seri teknis tidak boleh diputuskan server: tanpa pilihan eksplisit kandidat
+ * default (urutan abjad ranking) menang tanpa pernah dipilih siapa pun.
  */
 export function tieRequiresChoice(tie: boolean, payload: { teamId?: unknown; explicit?: unknown }): boolean {
   if (!tie) return false;
-  return typeof payload.teamId !== 'string' || payload.teamId.length === 0 || payload.explicit !== true;
+  return requiresExplicitChoice(payload);
 }
 
 export function rankPresses(presses: PressInput[], tieMs = 15): RankResult {
   const normalized = presses.map((p) => {
     const { dNorm, flags } = normalizePress(p);
-    return { teamId: p.teamId, dRaw: p.d, dNorm, u: p.u, flags };
+    return { teamId: p.teamId, dRaw: p.d, dNorm, u: p.u, flags, needsReview: pressNeedsReview(flags) };
   });
 
   normalized.sort((a, b) => (a.dNorm === b.dNorm ? a.teamId.localeCompare(b.teamId) : a.dNorm - b.dNorm));

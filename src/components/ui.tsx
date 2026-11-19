@@ -49,6 +49,7 @@ const STATUS_LABEL: Record<string, string> = {
   open: 'terbuka',
   live: 'berjalan',
   closed: 'ditutup',
+  finished: 'selesai',
   settled: 'selesai',
   void: 'dibatalkan',
 };
